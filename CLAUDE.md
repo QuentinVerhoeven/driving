@@ -13,6 +13,7 @@ Build one layer at a time. Don't start a new stage until the current one works o
 Every stage should produce something I can look at: a video, CSV, or plot.
 Keep changes small and suggest a git commit whenever something works.
 Don't add infrastructure I didn't ask for (see "Not doing").
+Log everything in NOTES.md as we go: tools/libraries chosen and why, design decisions, problems hit and how they were solved, results/numbers, and the reasoning behind tradeoffs. This is interview prep material, not documentation for its own sake — write it so I can read an entry months later and still explain the decision. Add an entry whenever a stage finishes, a non-trivial problem gets solved, or a design choice gets made, without waiting to be asked.
 Environment
 Windows laptop, working in WSL (Ubuntu) inside VS Code. Project lives in ~/driving-risk-analyzer, not under /mnt/c.
 CPU only (integrated Radeon, no NVIDIA). PyTorch is the CPU build via a pytorch-cpu uv index in pyproject.toml. Never install CUDA packages.
