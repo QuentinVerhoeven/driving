@@ -40,4 +40,45 @@ Talked through the project plan (originally sketched with ChatGPT) and stress-te
 
 ---
 
+## 2026-09-10 — track.py first run, ID-flicker debugging
+
+First working run of `track.py` on `data/raw/clip1.mov` (84s). Noticed heavy ID flicker in the annotated output: way more unique `track_id`s than plausible real vehicles.
+
+**Diagnosis, from the tracks CSV:**
+- 197 unique track IDs over ~2,500 frames, median track length only 8 frames (~0.3s) — real vehicles were instead showing up as several hundred-frame-long tracks (the top handful ran 400-943 frames), meaning most of the 197 IDs were noise, not distinct cars.
+- Compared confidence of short-lived tracks (<10 frames) vs long-lived ones (>=100 frames): 0.46 mean conf vs 0.60. Short tracks clustered right around the `--conf 0.3` threshold — the classic pattern of a detection's confidence oscillating just above/below the cutoff frame to frame, so it blinks in and out of existence and the tracker assigns a new ID each time it reappears (rather than bridging the gap).
+
+**Ablation — tracker choice vs confidence threshold:**
+
+| Config | Unique IDs | Median track len | Tracks <10 frames |
+|---|---|---|---|
+| ByteTrack, conf=0.3 (baseline) | 197 | 8 frames | 101 (51%) |
+| BoT-SORT, conf=0.3 | 196 | 10 frames | 97 (49%) |
+| ByteTrack, conf=0.5 | 109 | 12 frames | 50 (46%) |
+
+Switching trackers (ByteTrack -> BoT-SORT) barely moved the numbers. Raising the confidence threshold to 0.5 roughly halved the number of unique IDs. Conclusion: the flicker was mostly a detection-confidence problem, not a tracker re-identification weakness. Set `--conf` default to 0.5 in `track.py` as a result. Tracker default left as `bytetrack.yaml` (faster, and BoT-SORT showed no measurable benefit on this clip).
+
+**Also noticed:** `clip1.mov` is actually 3840x2160 (4K), not the 1080p30 the environment notes call for. This is very likely why CPU inference was slow (~6-8 fps processing on an 84s clip took 5-7 minutes) — 4K has ~4x the pixels of 1080p per frame. Re-shooting or downscaling future clips to 1080p should speed this up substantially. Not fixed yet, flagged for next session.
+
+---
+
+## 2026-09-10 — Remaining flicker traced to inference resolution (imgsz)
+
+Raising `--conf` (above) fixed most of the flicker, but distant, fully unobstructed cars straight ahead were still flickering — and specifically flickering *without* the track ID changing (the box would blink off then back on under the same ID). That's a different failure mode than the conf/ID-switch problem: ByteTrack was correctly bridging short gaps and keeping the ID alive, but the car just wasn't being *detected* on a lot of frames in between.
+
+**Root cause:** `model.track()` resizes frames to `imgsz` (default 640) before running detection, regardless of source resolution. The source video is 4K (3840x2160), so a distant car that's ~130px wide in the original frame gets shrunk to roughly ~20px wide at the default 640 inference size — right at the edge of what any detector can reliably see. This is an input-resolution problem, not a detector-quality problem, so it doesn't call for fine-tuning or a bigger model — just feeding the detector more real pixels for small objects.
+
+**Test:** trimmed `clip1.mov` to a 30s clip (`data/raw/clip1_30s.mov`, via `ffmpeg -t 30 -c copy`, same 4K resolution) for faster iteration, then compared `imgsz=640` vs `imgsz=1280`:
+
+| imgsz | Unique IDs | Median track len | Detection rate on real tracks (>=10 frames) |
+|---|---|---|---|
+| 640 (old default) | 40 | 16 frames | 76.0% (24 qualifying tracks) |
+| 1280 | 51 | 24 frames | 85.3% (34 qualifying tracks) |
+
+Unique-ID count going *up* at first looked like more flicker, but it's the opposite: `imgsz=1280` finds more real, distinct cars overall (more tracks reach the 10-frame bar to count as "real" instead of vanishing as sub-10-frame blips), and for tracks that do qualify, detection rate within the track rose from 76% to 85% (fewer blinks per car). Visually confirmed: much better on distant/unobstructed cars.
+
+**Decision:** set `--imgsz` default to 1280 in `track.py` (was 640). Tradeoff: slower CPU inference — worth watching processing fps on future runs and considering downscaling raw footage to 1080p (see prior entry) if this becomes a bottleneck. `imgsz` stays as a CLI flag so it's easy to trade off speed vs. small-object recall per run.
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->
