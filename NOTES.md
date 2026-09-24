@@ -185,4 +185,31 @@ Key insight: raw "unique track ID count" is a misleading metric for this specifi
 
 ---
 
+## 2026-09-24 (cont.) — Wiring automatic lead-selection into the Kalman-TTC pipeline
+
+Last loose end from the two previous entries: automatic lead-vehicle selection and the Kalman-filtered TTC were built and validated separately, each still reading from a hardcoded `track_id == 4`. Wired them together in `explore.ipynb`, one step at a time:
+
+**Step 1 — build a width series from the auto-selected lead, not a hardcoded ID.** Merged `lead_hyst` (the hysteresis output: one `track_id` per frame) against `all_boxes` on `(frame, track_id)` to pull back `w`/`h`. Sanity check: on every frame the two series have in common, the auto-selected width matches the old hardcoded-ID width exactly (max diff 0.0) — confirms the merge is just relabeling the same data, not introducing new logic. The auto series has fewer rows (793 vs. 875) because hysteresis sometimes has zero in-band candidates for a frame; the hardcoded filter never cared about "in-band," just "is this ID present."
+
+**Step 2 — checked whether the auto series needs special handling before feeding the Kalman filter.** Two ways this could go wrong that don't exist with a hardcoded ID: (a) a genuine ID switch would make width jump for a fake reason, not a real distance change, and (b) missing frames create bigger gaps between real measurements than the usual 1/30s. On this clip, (a) doesn't happen — auto-selection was 100% ID 4, already confirmed in the previous entry. For (b): the largest gap is 83 frames (2.77s), around t=4.1-6.9s. Checked the raw boxes in that window — ID 4 was detected the whole time, just drifted left of the 10% lane band (cx down to ~1430px vs. the band edge at 1536px, likely the road curving) before coming back in-band. Not a detection failure. Concluded this needs **no new code**: the Kalman `Q` matrix is already scaled by `dt` specifically so a longer gap between measurements makes the filter trust its own prediction less — that was designed in from the start (see the 2026-09-24 Kalman-build entry, step 2) and this is exactly the situation it was for, just not one we'd actually hit yet.
+
+**Step 3 — reran the Kalman filter on the auto-selected series (same tuning: q_width=1, q_rate=50, R=25) and re-validated against real footage.** Grouped consecutive frames with Kalman TTC < 8s into events, same method as the original hand-picked-ID validation:
+
+| start_s | end_s | n_frames |
+|---|---|---|
+| 4.14 | 4.14 | 1 |
+| 14.95 | 15.38 | 14 |
+| 17.35 | 17.85 | 11 |
+| 18.72 | 18.85 | 5 |
+| 18.99 | 19.49 | 16 |
+| 23.29 | 25.16 | 57 |
+
+The longest, clearest event (23.3-25.2s, 57 frames) is essentially unchanged from the hand-picked-ID version — same start, same end, same frame count. The 14.95s and 18.7-19.5s events also still show up, just split slightly differently (18.7-19.5s became two events instead of one, and a new short one appears at 17.35s) because a handful of frames in those stretches got excluded by the lane-band filter, not because the underlying physical event changed. The 4.14s event shrank from 18 frames to 1 for the same reason — most of that frame range fell outside the auto-selection's in-band criterion. None of this is a regression: it's the expected cost of layering "is this box actually in my lane" on top of "is this box present," and the one event that matters most for validation (the long, sustained 23-25s stretch) is untouched.
+
+**Stage complete:** automatic lead-vehicle selection now feeds the Kalman-filtered TTC directly — no more manually picking a track ID anywhere in the pipeline. This closes out Week 2 (`Lead-vehicle selection + TTC on recorded clips` per the CLAUDE.md roadmap) end to end. Next: Week 3, first live version (webcam on windshield, live boxes + TTC + audio alert).
+
+**Side note:** needed to actually execute `explore.ipynb` headlessly to verify these cells (rather than just reading the code and assuming it runs) — `jupyter nbconvert`/`jupyter run` weren't set up for this. Added `nbclient`/`nbformat` as dev dependencies to run the notebook from a script and write outputs back in place.
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->
