@@ -81,4 +81,55 @@ Unique-ID count going *up* at first looked like more flicker, but it's the oppos
 
 ---
 
+## 2026-09-12 — First TTC attempt, and why raw box-width TTC is too noisy
+
+Set up `explore.ipynb` and computed TTC from `outputs/clip1_30s_tracks.csv` for a hand-picked lead car (track ID 4, chosen by watching the annotated video and noting it held a stable ID through a stretch of closing-in around 16-30s). Implemented the plan from NOTES.md's 2026-09-10 entry: rolling mean over box width `w`, `dw_dt = np.gradient(w_smooth, time_s)`, `ttc = w_smooth / dw_dt` (only defined when `dw_dt > 0`). Tried smoothing windows of 5, 15, and 30 frames.
+
+**Result: TTC was extremely jagged at every window size** — not just noisy-looking, but flipping between `nan` and huge (>1000s) values constantly. Diagnosed with two checks before touching the code:
+
+1. **Track continuity:** ID 4 has 812 of 902 possible frames (90% coverage), mostly single 1-2 frame gaps plus one 26-frame (~0.87s) gap. Real, but too small and localized to explain jaggedness across the *entire* 30s clip.
+2. **`dw_dt` behavior:** `dw_dt` flips sign 54 times in 30s (~1.8/sec) — far faster than a real car's closing/pulling-away pattern could physically change. 18% of frames have `|dw_dt| < 5 px/s` (i.e. near-zero, dominated by detector noise, not real motion). Only 58% of frames end up with a usable (non-nan) TTC. Raw TTC stats: mean 39.5s, std 149.7s, max 2372s before clipping.
+
+**Root cause:** `TTC = w / dw_dt` is a ratio, and dividing by a near-zero, noisy denominator amplifies whatever noise is left after smoothing `w` — this is separate from (and dominates over) the frame-gap issue. It's especially bad during steady-following stretches, which is most of a normal drive: the *true* `dw_dt` is close to zero there, so measurement noise easily flips its sign frame to frame. A bigger rolling window on `w` doesn't fix this because the derivative of even a smooth signal is still sensitive near zero — you have to smooth the *rate estimate itself*, with memory across frames, not just the position.
+
+**Decision:** this confirms the plan from the 2026-09-10 entry was right to specify a Kalman filter rather than a raw derivative. Next step: implement a constant-velocity Kalman filter over box width (state = `[width, dw/dt]`, width as the only measurement) by hand, no `filterpy` dependency, so every line stays explainable in an interview. Expect this to damp the sign-flipping because the filter's rate estimate has inertia — a single noisy frame can't flip it the way a raw frame-to-frame derivative can.
+
+**Also confirmed (not yet fixed):** `.rolling(window, center=True)` uses future frames, which a live system can't do — noted already in the 2026-09-10 plan as a reason a Kalman filter (which only uses past + current measurements) is needed for the live version anyway, not just as a noise fix for the offline version.
+
+---
+
+## 2026-09-24 — Hand-rolled Kalman filter for TTC, built step by step
+
+Implemented a constant-velocity Kalman filter over box width in `explore.ipynb`, added incrementally (state -> predict -> update -> full loop -> retuning) so every line could be explained rather than pasted in as a block. No `filterpy` dependency — done by hand with plain NumPy, per the 2026-09-12 decision.
+
+**Model:**
+- State `x = [width, dw/dt]`, only width is measured (`H = [1, 0]`).
+- `F = [[1, dt], [0, 1]]` — constant-velocity assumption: predicted width = current width + rate * dt, rate assumed to persist.
+- `Q` (process noise) scaled by `dt` on both state components — the longer the gap since the last measurement (e.g. across a dropped-frame gap), the more the true rate could have drifted, so uncertainty should grow more over bigger gaps. This falls out naturally from scaling by `dt` rather than needing special-case gap handling.
+- `R` (measurement noise) is a fixed guess at per-frame box-width jitter (px²).
+- Each step: predict (`x = Fx`, `P = FPF^T + Q`), then update using the innovation `y = measurement - prediction`, Kalman gain `K` computed from `P` and `R`, `x = x + Ky`, `P` shrinks accordingly.
+
+**First result (q_width=1, q_rate=50, R=25):** `dw_dt` sign flips dropped from 54 (raw derivative baseline, see 2026-09-12 entry) to 15 over the same 30s clip; fraction of frames with usable (non-nan) TTC stayed ~58% (expected — that ratio reflects how much of the real drive was spent closing vs. not, which filtering shouldn't change, only the noise-driven flips should).
+
+**TTC plot was calmer but still visibly spiky.** Two distinct explanations, not one:
+1. **Tuning was too loose.** `q_rate=50` relative to `R=25` still let the rate estimate react quickly to individual noisy measurements. Retuned to `q_rate=5, R=100` (trust momentum more, trust each width reading less) and sign flips dropped further, 15 -> 10. An even tighter test (`q_width=0.5, q_rate=1, R=200`) got flips down to 4.
+2. **Some spikiness is inherent to the TTC formula, not filter error.** During genuine steady-following stretches, the *true* `dw/dt` really is near zero (not just noisy) — and `TTC = width/rate` is mathematically supposed to blow up toward infinity there. A perfectly-estimated near-zero rate still produces a TTC that swings between a real low value and the clip ceiling as it crosses zero. This is the metric working as intended, not a bug — worth remembering as a real limitation of box-expansion TTC to explain in interviews (it's meaningful during active closing events, not as a continuously stable "distance-like" signal).
+
+**Tuning decision: keep `q_width=1, q_rate=50, R=25` (the original/"current" values), not the tighter retune.** Plotting "current" vs. "tighter" (`q_rate=5, R=100`) side by side showed why: during real closing events, the tighter filter's TTC dips only reached ~8-9.4s, while "current"'s dips reached the true ~4-8.5s range. Lowering `q_rate` makes the filter distrust that the rate can change quickly, so it lags and *understates* real closing events — for a collision-relevant metric, quietly blunting a real dip is worse than some residual jaggedness. Lesson: don't just chase "smoother-looking plot" when tuning a Kalman filter for a safety-adjacent signal — check whether it's still capturing the true depth/timing of real events, not just reducing noise. Some jaggedness in the final signal is expected and partly inherent to the TTC formula (see above), not automatically a sign of bad tuning.
+
+**Validation against real footage:** grouped consecutive Kalman-TTC frames below an 8s threshold into discrete "events" (start/end time, frame count) instead of eyeballing the plot. Result on `ID 4`, current tuning:
+
+| start_s | end_s | n_frames |
+|---|---|---|
+| 4.14 | 4.94 | 18 |
+| 14.95 | 15.35 | 13 |
+| 18.72 | 19.35 | 16 |
+| 23.29 | 25.16 | 57 |
+
+The longest, clearest event (23.3-25.2s, 57 frames — far more sustained than the others) falls inside the 16-30s closing stretch noted by eye while watching `outputs/clip1_30s_tracked.mp4` in VLC before this session (see step-1 note). Two shorter dips (14.95s, 18.72s) also fall in that window. One dip (4.14s) is outside the noted window — likely a real event that just wasn't written down, not investigated further. Overall: the filtered TTC is finding events at real, plausible timestamps rather than noise-driven spikes, which is the actual validation this stage needed (not just "does the plot look smoother").
+
+**Stage complete:** hand-rolled Kalman-filtered TTC from box-width expansion works on real footage for a single hand-picked lead car, with parameters and reasoning documented above. Next stage (per CLAUDE.md roadmap): automatic lead-vehicle selection, so TTC doesn't require manually picking a track ID.
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->

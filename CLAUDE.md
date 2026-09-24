@@ -57,6 +57,6 @@ No React/FastAPI, no database, no cloud deployment, no Docker (for now), no cust
 
 Current status
 
-Week 1. track.py runs YOLO + tracking on a video and writes outputs/<clip>_tracked.mp4 and outputs/<clip>_tracks.csv (columns: frame, time_s, track_id, cls, conf, x1, y1, x2, y2, w, h).
+Week 2. track.py runs YOLO + tracking on a video and writes outputs/<clip>_tracked.mp4 and outputs/<clip>_tracks.csv (columns: frame, time_s, track_id, cls, conf, x1, y1, x2, y2, w, h). TTC from box-width expansion, smoothed with a hand-rolled Kalman filter (state = [width, dw/dt]), working in explore.ipynb for a hand-picked lead car (no automatic lead-vehicle selection yet). Validated against real footage: filtered TTC dips line up with closing events noted by eye in the video. See NOTES.md for the Kalman tuning/validation details. Next: automatic lead-vehicle selection.
 
 <!-- Update this section as the project progresses. -->
