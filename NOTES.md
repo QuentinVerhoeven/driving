@@ -132,4 +132,57 @@ The longest, clearest event (23.3-25.2s, 57 frames — far more sustained than t
 
 ---
 
+## 2026-09-24 (cont.) — Automatic lead-vehicle selection, first pass
+
+Started the next roadmap item: automatic lead-vehicle selection (previously TTC used a hand-picked track ID). Heuristic: "in my lane" = box horizontal center within a band around frame-center (no real lane-line detection); among in-band boxes per frame, pick the largest by area (nearest).
+
+**Band choice check:** histogram of box center-x across all detections/frames showed a clear peak near frame-center, supporting a center-band proxy for "in lane" on this clip. Set `BAND_HALF_WIDTH = 0.15 * FRAME_WIDTH` (~30% of frame width total) as a first guess.
+
+**Result on `clip1_30s`:** selects a candidate in 896/901 frames. Track ID 4 (the hand-picked lead car) dominates at 698 frames (78%). Second-most is ID 94 at 107 frames, taking over cleanly and holding continuously from 26.06s through the end of the clip.
+
+**Initial (wrong) guess vs. actual cause:** first assumed ID 94 was the same physical lead car re-acquired under a new ID after a tracking gap. Checked the actual video instead of just the numbers: **ID 94 is a self-detection** — the dashcam's own car (hood/mirror/dash) being misclassified as a vehicle by YOLO, not a real car ahead. It sat centered and large enough to win the "biggest box in the lane band" heuristic for the whole last ~4s of the clip. Lesson: a plausible-looking pattern in the numbers (clean single handoff, holds till the end) is not the same as confirming ground truth against the actual footage — should have looked at the video before writing down a causal story.
+
+**Also seen:** several other IDs (30, 32, 34, 53, 55, 56) get picked for a handful of scattered frames each, concentrated in the busier 8-20s stretch — likely other real vehicles briefly crossing into the center band that momentarily have a larger box than the true lead car. Separate problem from the self-detection one; still needs addressing.
+
+**Self-detection filter, implemented:** confirmed via the actual video (not just the numbers) that ID 94 is a self-detection of the dashcam car's own hood/dash. Measured its actual box geometry to set real thresholds rather than guessing: ID 94 boxes average 4.97:1 width:height (vs. 1.26:1 for the real lead car, ID 4) and sit with bottom edge at 99.8% of frame height (vs. 55.5% for ID 4) — essentially glued to the bottom of the frame. Added a filter excluding boxes with `aspect_ratio > 2.5` or `y2 > 0.95 * frame_height`, applied on top of the lane-band filter. Deliberately filtered on shape/position, not the track ID itself, since IDs aren't stable across runs/clips.
+
+**Result after the fix:** ID 4's share rose from 698 -> 787 of 892 candidate frames (88%); ID 94 dropped out of the candidates entirely. Remaining scattered picks (IDs 32, 89, 30, 55, etc., a few dozen frames each) are the separate, still-unaddressed flicker problem from other real vehicles briefly crossing into the lane band.
+
+**Temporal stickiness (hysteresis), implemented:** once a car is "the lead," keep it unless (a) missing from candidates for `LOST_STREAK=5` consecutive frames, or (b) a different car has been the single biggest candidate for `SWITCH_STREAK=10` consecutive frames (a sustained overtake, not a 1-2 frame blip). Frame-by-frame loop, not vectorizable (decision at frame *i* depends on running state). Result: unique picked IDs dropped to just 4 (from 8 with the raw per-frame rule), and remaining non-lead picks got *longer*, not shorter (e.g. ID 32: 41 -> 63 frames) -- expected, since hysteresis makes whichever ID currently holds the "lead" title sticky, including a wrongly-adopted one.
+
+**New failure mode surfaced by hysteresis: ID 89.** Watched the video -- ID 89 is a real car pulling up alongside while the dashcam car is stopped, not the lead car. It got adopted as lead for 25 sustained frames because, while alongside, its box is both large (close) AND ends up within the 15%-of-center band -- a 2D box position alone can't distinguish "ahead of me" from "beside me but currently centered in this frame," especially when stopped (no forward motion to disambiguate). Confirmed in the numbers: ID 89's box starts at frame edge (`x1=9.3`) and visibly slides across ~2s to center as it pulls alongside -- the giveaway is in its *trajectory*, which a single-frame heuristic doesn't see.
+
+**Tried and rejected:** switching the primary selection rule from "biggest box in band" to "most-central box" (dropping the band filter) made things worse -- e.g. ID 30 (a small, distant, real car) jumped to 155 picks. A small box's center position is much noisier frame-to-frame than a large box's, so pure centering without a size prior lets tiny far-away detections win by chance. Area-based selection was already doing useful noise-rejection that pure centering threw away.
+
+**Actual fix: tighten the band, keep area-based selection.** Tested `band_half_width` at 15%/10%/8%/6% of frame width (all with the same area-based-within-band selection + hysteresis). ID 89 never gets closer than ~260px from center at its closest (vs. ID 4's ~46-160px), so a 10%-of-frame-width band (384px half-width) excludes it entirely while still covering the real lead car's horizontal jitter. **Decision: `BAND_HALF_WIDTH = 0.10 * FRAME_WIDTH`.** Result: ID 4 share actually improved slightly (86.8% -> ~88%+) and ID 89 dropped out completely. Remaining minor ID 30/32 picks are a handful of frames each, likely the tracker briefly losing ID 4 during one of its known gaps (2026-09-12 entry) and temporarily falling back to a real, more distant in-lane car -- reasonable behavior, not a false positive.
+
+**Known remaining limitation, accepted for now:** a stopped-car-with-another-pulling-alongside scenario can still fool this heuristic if the alongside car gets close enough to fall inside even a 10% band for 10+ sustained frames. True lane-line/road-geometry detection (out of scope for this stage) or motion-history features (was this box sliding in from a frame edge recently?) would fix this properly. Noting it now rather than chasing it further -- matches "build one layer at a time."
+
+---
+
+## 2026-09-24 (cont.) — Root cause of the ID 30/32 fallback switches: `--conf` was blocking ByteTrack's own occlusion recovery
+
+The remaining ID 30/32 lead-selection fallbacks (from the entry above) traced back to the real lead car (ID 4) briefly not being detected at all for ~0.2-0.9s stretches a few times per clip (29 gaps total in the original `clip1_30s` run, one of them 26 frames). Investigated whether fine-tuning the detector would help, but found a much cheaper root cause first: **`track.py` passes `--conf` straight into `model.track(conf=...)`, and Ultralytics applies that threshold to filter raw detections BEFORE they reach ByteTrack.** ByteTrack is explicitly designed with two thresholds for this exact situation — `track_high_thresh: 0.25` for confident matches and `track_low_thresh: 0.1` for a second-stage pass that recovers occluded/awkward-angle detections without letting them spawn new tracks (guarded by `new_track_thresh: 0.25`). Raising `--conf` to 0.5 (2026-09-10 decision, to fix the original ID-flicker problem) discarded everything below 0.5 upstream, so ByteTrack's own 0.1-0.25 recovery band never received any detections to work with.
+
+**Tested `--conf` at 0.1, 0.25, 0.4, and 0.5 (current) on `clip1_30s`, both on raw tracker output and on the actual downstream lead-selection pipeline (band+area+hysteresis from the entries above):**
+
+| conf | unique track IDs (raw) | tracks <10 frames | ID4 frames/gaps | lead-selection: ID4 share |
+|---|---|---|---|---|
+| 0.5 (old default) | 51 | 17 | 812/902, 29 gaps (max 26) | 692/781 (88.6%), 2 fallback IDs |
+| 0.4 | 75 | 30 | 875/902, 15 gaps (max 5) | 793/793 (**100%**) |
+| 0.25 | 121 | 65 | 895/902 | 813/813 (**100%**) |
+| 0.1 | 118 | 56 | 897/902, 3 gaps (max 4) | 815/819 (99.5%), 1 tiny blip |
+
+Key insight: raw "unique track ID count" is a misleading metric for this specific purpose. It roughly triples at low `conf` (more background noise spawning brief spurious tracks), but that noise barely affects lead-selection because the lane-band + self-detection + area filters already reject almost all of it -- what actually matters is whether the *lead car itself* stays continuously tracked, and lower conf directly fixes that.
+
+**Decision: set `--conf` default to 0.4`, not 0.1 or 0.25.** It achieves the same 100% lead-selection stability as the more permissive settings, while keeping meaningfully less general-purpose noise (75 vs. ~120 unique IDs) -- relevant if this pipeline later needs to track/reason about vehicles other than just the lead car (e.g. adjacent-lane events). Regenerated the official `outputs/clip1_30s_tracked.mp4`/`_tracks.csv` with the new default.
+
+**Process note:** before touching the model or tracker config, actually read how `--conf` flows through `model.track()` rather than assuming "raise conf = less flicker" was still the right lever -- the original 2026-09-10 fix was correct for the problem it solved (noisy low-confidence detections causing ID churn) but had an unintended side effect (blocking legitimate occlusion recovery) that only showed up once a downstream consumer (lead selection) made track continuity matter in a new way.
+
+**Re-validated end-to-end against the new `conf=0.4` CSV:** re-ran `explore.ipynb`'s lead-selection pipeline (band=10%, area-based, hysteresis, self-detection filter) on the regenerated data. Result: **793/793 frames (100%) picked ID 4** as lead, zero fallback switches to other IDs -- matches the table above exactly. Automatic lead-vehicle selection is now solid on this clip with no manual ID picking and no ID-switch artifacts.
+
+**Stage complete:** automatic lead-vehicle selection (lane-band + self-detection filter + hysteresis) + the `--conf` fix together give a clean, continuous lead-car track with no manual intervention. Combined with the earlier Kalman-filtered TTC work, this finishes the roadmap's "Lead-vehicle selection + TTC on recorded clips" milestone. Next: wire automatic selection directly into the Kalman-TTC computation (currently still two separate pieces in the notebook), then decide on Week 3's first live version.
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->
