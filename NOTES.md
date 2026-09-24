@@ -212,4 +212,32 @@ The longest, clearest event (23.3-25.2s, 57 frames) is essentially unchanged fro
 
 ---
 
+## 2026-09-24 (cont.) — Scope correction: speeding + potholes belong on the roadmap after all
+
+Caught a gap between what was actually agreed and what `CLAUDE.md` says. The original planning chat (before the 2026-09-10 "Initial planning" session logged above) explicitly agreed to do both the core CV pipeline *and* a sensor-fusion track: speeding (GPS speed vs. OpenStreetMap speed-limit tags) and potholes (a fine-tuned detector, GPS-tagged and mapped with Folium, explicitly *not* Google Maps, to avoid needing a billing account for a portfolio project). Somewhere between that conversation and writing `CLAUDE.md`, both features silently dropped out of the roadmap — no entry anywhere recorded an actual decision to cut them, they just didn't make it into the doc.
+
+Re-decided with two more inputs than the original chat had:
+1. A contact at NVIDIA specifically suggested the pothole detection feature.
+2. Weighing cost: speeding is nearly free (GPS logging is already week 4 work for ego-speed/headway; the speeding check itself is a lookup + subtraction), while potholes is a second, real detection subsystem — its own dataset, its own fine-tuned model, its own precision/recall evaluation — not an afternoon add-on the way it might have sounded in the original chat.
+
+**Decision: add both back into the roadmap for real**, not as a vague stretch goal:
+- Week 5: speeding detection (GPS + OSM speed limits), right after week 4's GPS/accelerometer logging work, since it reuses that data directly.
+- Week 6: pothole detection as its own week — dataset, fine-tuned detector, GPS map — treated with the same evaluation rigor as the rest of the project (precision/recall on a held-out set), not just a cool-looking map of pins.
+
+Both pushed the KITTI/BDD100K evaluation + accident-anticipation stretch work back by two weeks (now 7-9) and the final polish week to 10+. Updated `CLAUDE.md`'s description, pipeline, stack (added osmnx/Overpass, Folium), evaluation plan, and roadmap accordingly. The "no custom detector from scratch" line in "Not doing" got a caveat: the pothole detector is a small fine-tune of an existing model, not training from zero, so it doesn't actually contradict that rule.
+
+**Lesson:** a real planning conversation happened, real decisions got made in it ("maybe we could do both"), and none of it got written down anywhere durable — it only existed in a chat transcript I could easily have lost track of. `CLAUDE.md` is supposed to be the source of truth for what the plan actually is; if a decision doesn't make it in there (or here), it might as well not have happened.
+
+---
+
+## 2026-09-24 (cont.) — Week 3 setup: native Windows environment, and the phone is the live camera
+
+**Native Windows setup (WSL can't reach a webcam).** Nothing was installed on the Windows side, so: `uv` via the official PowerShell installer (lets uv manage Python 3.12 itself, same as in WSL), git via `winget install --id Git.Git`, then a fresh `git clone` of the GitHub repo into a normal Windows folder + `uv sync`. Chose a separate clone synced through git over running from `\\wsl$\...` paths: the WSL copy stays the main dev environment, the Windows copy exists only to run live capture. The `pytorch-cpu` index in `pyproject.toml` is cross-platform, so no config changes were needed. Problem hit: after `winget install`, `git` was still "not recognized" in new PowerShell windows (Windows shells can inherit a stale PATH from their parent process); fixed by verifying the install path and restarting so the PATH refreshed.
+
+**Design decision: the phone is the live camera too, not a separate webcam.** The roadmap originally said "webcam on windshield." Better: the phone captures (streamed to the laptop via a phone-as-webcam app, so it appears as an ordinary camera index in OpenCV), the laptop does all compute. Reasons: better camera than any laptop/USB webcam, easy to mount, and it's the same device that already logs GPS/accelerometer in Weeks 4-5, so live and recorded footage share one sensor. Open risks to test rather than assume: (1) the stream will likely be 720p/1080p, not the 4K clip the detection settings (`imgsz`, `--conf`, lane band) were tuned on, and earlier debugging showed low resolution makes distant cars flicker, so tuning may need rechecking on streamed footage; (2) latency/frame-rate over USB vs Wi-Fi; (3) whether the phone can stream video and log GPS at the same time.
+
+**First live-step script:** `webcam_check.py` opens a camera with OpenCV (DirectShow backend on Windows) and shows raw FPS, with no YOLO. Purpose: separate "can we get frames and how fast" from "how slow is the model," so if the full live loop is slow we know which piece to blame. Works with any device Windows exposes as a camera (`--camera N`), so it's the same test for a laptop webcam or the phone stream.
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->

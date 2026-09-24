@@ -1,6 +1,6 @@
 Driving Risk Analyzer
 
-A computer vision system that analyzes dashcam video to measure driving risk: detect and track vehicles, identify the lead vehicle, estimate time-to-collision (TTC), distance, and headway, detect risky events (tailgating, hard braking, rapid closing), and produce a report. Portfolio project for ML internship applications.
+A computer vision + sensor-fusion system that analyzes dashcam video and phone GPS/accelerometer logs to measure driving risk: detect and track vehicles, identify the lead vehicle, estimate time-to-collision (TTC), distance, and headway, detect risky events (tailgating, hard braking, rapid closing, speeding, potholes), and produce a report. Portfolio project for ML internship applications.
 
 Two deliverables matter equally:
 
@@ -20,10 +20,10 @@ CPU only (integrated Radeon, no NVIDIA). PyTorch is the CPU build via a pytorch-
 Python 3.12, managed with uv (uv add, uv run).
 Heavy jobs (depth models, batch processing, training) run on Kaggle GPUs. Local work uses short clips (30-60 s) and nano models.
 The live demo will run in native Windows Python (WSL can't easily access webcams), so live-capture code must not depend on WSL-specific paths.
-Sensor: iPhone video (1080p30, H.264) plus GPS logging for ego speed.
+Sensor: iPhone video (1080p30, H.264) plus GPS + accelerometer logging (speed, position, hard-braking/cornering events).
 Stack
 
-Python, Ultralytics YOLO (yolo26n.pt), built-in trackers (ByteTrack, BoT-SORT), OpenCV, NumPy/SciPy, pandas, matplotlib, PyTorch, scikit-learn, Streamlit for the post-drive report. Later: ONNX/OpenVINO export for faster CPU inference.
+Python, Ultralytics YOLO (yolo26n.pt), built-in trackers (ByteTrack, BoT-SORT), OpenCV, NumPy/SciPy, pandas, matplotlib, PyTorch, scikit-learn, Streamlit for the post-drive report. osmnx/Overpass API for road speed-limit lookups (speeding check). Folium for the pothole map (not Google Maps -- see "Not doing"). Later: ONNX/OpenVINO export for faster CPU inference.
 
 Pipeline
 Detection (pretrained YOLO, vehicle classes only)
@@ -34,8 +34,10 @@ TTC from bounding-box expansion: TTC ≈ w / (dw/dt), smoothed with a Kalman fil
 Ego speed from iPhone GPS.
 Distance in meters (camera calibration + ground-plane geometry, later a metric depth model).
 Time headway = distance / ego speed.
-Events from patterns over time (sustained low headway, rapidly dropping TTC, hard braking)
-Scoring + Streamlit report (video, TTC plot, clickable event timeline)
+Events from patterns over time (sustained low headway, rapidly dropping TTC, hard braking from accelerometer)
+Speeding: compare GPS speed against OpenStreetMap speed-limit tags for the matched road segment, flagging sustained excess (not single noisy samples). Report speed-limit tag coverage honestly -- many minor roads are untagged, skip them rather than guess.
+Potholes: fine-tuned detector (separate from the vehicle YOLO) on a labeled pothole dataset, GPS-tagged and plotted on a Folium map. Suggested by a contact at NVIDIA -- see NOTES.md for the scoping discussion.
+Scoring + Streamlit report (video, TTC plot, clickable event timeline, pothole map)
 
 Stretch ML component: accident anticipation on DoTA/CCD (real crash and near-miss clips), with baselines first.
 
@@ -43,20 +45,23 @@ Evaluation plan
 Distance accuracy on KITTI (LiDAR ground truth), comparing ground-plane geometry vs a depth model, reported by range.
 Tracker comparison (ByteTrack vs BoT-SORT) on a standard tracking benchmark (HOTA/IDF1).
 Event detection precision/recall on hand-labeled clips (BDD100K + my own drives).
+Pothole detector precision/recall on its own held-out labeled set.
 Roadmap
 Week	Milestone
 1	Detection + tracking on a recorded clip (track.py)
 2	Lead-vehicle selection + TTC on recorded clips, first TTC plot
-3	First live version: webcam on windshield, live boxes + TTC + audio alert
-4-5	GPS speed, calibration, distance, headway, events
-5-7	KITTI/BDD100K evaluation, accident-anticipation model
-8+	Final live demo, Streamlit report, polished README
+3	First live version: phone on windshield streaming to the laptop as a webcam, live boxes + TTC + audio alert
+4	GPS/accelerometer logging, calibration, distance, headway, core events (tailgating, hard braking, rapid closing)
+5	Speeding detection (GPS + OSM speed limits) -- cheap, reuses week 4's GPS log
+6	Pothole detection: dataset + fine-tuned detector + GPS map (Folium)
+7-9	KITTI/BDD100K evaluation, accident-anticipation model
+10+	Final live demo, Streamlit report, polished README
 Not doing
 
-No React/FastAPI, no database, no cloud deployment, no Docker (for now), no custom detector from scratch, no mobile app, no Google Maps integration. Don't claim it's a safety system.
+No React/FastAPI, no database, no cloud deployment, no Docker (for now), no custom detector from scratch (except the pothole detector, which is a small fine-tune, not from-scratch), no mobile app, no Google Maps integration (Folium instead -- no API key/billing account needed). Don't claim it's a safety system.
 
 Current status
 
-Week 2 complete. track.py runs YOLO + tracking on a video and writes outputs/<clip>_tracked.mp4 and outputs/<clip>_tracks.csv (columns: frame, time_s, track_id, cls, conf, x1, y1, x2, y2, w, h). --conf default is 0.4 (not 0.5 -- see NOTES.md, 0.5 blocked ByteTrack's own occlusion-recovery thresholds and caused real gaps in the lead car's track). In explore.ipynb: automatic lead-vehicle selection (lane-band +-10% of frame width + area-based pick + self-detection filter + temporal hysteresis, 100% correct on clip1_30s, no manual ID picking) now feeds directly into TTC from box-width expansion, smoothed with a hand-rolled Kalman filter (state = [width, dw/dt]) -- the two pieces are wired together end to end and re-validated against real footage. Next: Week 3, first live version (webcam on windshield, live boxes + TTC + audio alert).
+Week 2 complete. track.py runs YOLO + tracking on a video and writes outputs/<clip>_tracked.mp4 and outputs/<clip>_tracks.csv (columns: frame, time_s, track_id, cls, conf, x1, y1, x2, y2, w, h). --conf default is 0.4 (not 0.5 -- see NOTES.md, 0.5 blocked ByteTrack's own occlusion-recovery thresholds and caused real gaps in the lead car's track). In explore.ipynb: automatic lead-vehicle selection (lane-band +-10% of frame width + area-based pick + self-detection filter + temporal hysteresis, 100% correct on clip1_30s, no manual ID picking) now feeds directly into TTC from box-width expansion, smoothed with a hand-rolled Kalman filter (state = [width, dw/dt]) -- the two pieces are wired together end to end and re-validated against real footage. Next: Week 3, first live version (phone on windshield streamed to the laptop, live boxes + TTC + audio alert). Setting up native Windows Python (uv + git installed, repo cloned) and checking raw camera FPS with webcam_check.py before adding YOLO.
 
 <!-- Update this section as the project progresses. -->
