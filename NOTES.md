@@ -305,4 +305,28 @@ Both pushed the KITTI/BDD100K evaluation + accident-anticipation stretch work ba
 
 ---
 
+## 2026-09-24 (cont.) — Week 3, live loop step 3: Kalman TTC in the loop, with real timestamps
+
+**What changed in `live.py`.** The lead's box width now feeds `TTCKalman` every frame, the TTC is shown as a fixed on-screen readout, and `--log` saves `frame, t, track_id, width, ttc` per frame to a CSV.
+
+**Design decisions and why:**
+- **Timestamps must be real.** The Kalman filter uses `dt` between measurements (in both the motion model and the process noise `Q * dt`), so `dt` has to be the true elapsed time. Live we only process ~5 of the camera's 30 fps, so assuming 1/30 s would make every velocity estimate ~6x too large. For a *file*, `t = frame_idx / src_fps` (position in the video, independent of how fast this laptop runs, and identical to the notebook's `time_s`). For a *camera*, `t = time.time() - start` (wall clock: frames arrive when they arrive).
+- **Kalman created once, before the loop**, same reason as the selector: its `[width, rate]` state must persist. On frames with no lead we skip the Kalman step; `Q * dt` absorbs the gap.
+- **Display:** `TTC 4.2 s`; `TTC --` when TTC is `nan` (box not growing, or the filter just reset); `TTC >10 s` above 10 (matching the 10 s clip on the notebook plots).
+
+**Validation against the notebook** (first 300 frames of `clip1_30s`; ran the notebook's batch code and compared): same 217 lead frames, widths identical, and the same frames have/lack a TTC. TTC values differ by up to 7.8 s, but only at frames 59-64 where TTC is ~300 s: there the rate is almost zero and `TTC = width / rate` amplifies any tiny difference. Where TTC actually matters (batch TTC < 10 s, 18 frames), the max difference is 0.007 s (0.08%). Cause: the batch run uses the CSV's `time_s` rounded to milliseconds, live uses exact `frame/30`. An earlier test feeding the filter those rounded times matched to 1e-14, so timestamps are the only difference.
+- **Lesson:** TTC is a ratio and blows up as the denominator approaches zero, so compare it only in the range where it is meaningful (small TTC). Comparing the raw max difference was misleading.
+
+**Problem hit: unreadable overlay.** First version drew the TTC text above the lead box. Over a small, distant box it collided with Ultralytics' own label text and could not be read. Moved it to a fixed large readout in the top-left under the FPS counter, which is better for the demo anyway (fixed place to look).
+
+**Also visible in the output frames:** Ultralytics detects our own hood as a car (`id:7 car 0.41`); the self-detection filter correctly ignores it.
+
+**Open risk for the retuning step:** `R = 25 px^2` and `q_rate = 50 px/s` are in pixel units tuned on 4K widths. TTC itself is a ratio and does not depend on resolution, but the noise parameters do: at 720p widths are ~1/5 as large, so those values will need scaling or retuning.
+
+**Also to watch with a real camera:** OpenCV camera buffers can hand back stale frames when we process slower than the camera delivers, adding latency. May need to shrink the buffer or drop frames.
+
+**Next:** step 4, retest at 720p/1080p (resize the clip) to see whether `imgsz`, `--conf`, the lane band and the Kalman noise values hold up, since the phone stream won't be 4K.
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->
