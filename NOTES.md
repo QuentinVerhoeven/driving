@@ -506,4 +506,43 @@ At every frame the new filter reproduces the original's behavior; at live rate i
 
 ---
 
+## 2026-09-25 (cont.) — Readiness pass for a real drive (`live.py`, `lead_ttc.py`)
+
+**Approach.** I cannot run the real camera in a moving car from WSL, so I listed what could go wrong in a car, fixed what could be fixed, and tested each failure with fake cameras. What could not be tested is listed at the bottom.
+
+**Lead-selection streaks are now in seconds, not frames.** `SWITCH_STREAK=10`/`LOST_STREAK=5` frames meant 3x more real time at the ~10 fps live rate than at the 30 fps they were tuned on. Now `SWITCH_TIME=0.30 s`, `LOST_TIME=0.30 s`, and never fewer than `MIN_FRAMES=2` frames. `LeadSelector.update(boxes, t)` takes the frame timestamp. Tested on the 1280 tracks, where the true lead is track 4 for the whole clip:
+
+| stride | LOST_TIME | lead frames | share that is the true lead |
+|---|---|---|---|
+| 1 (30 fps) | 0.13 to 0.8 s | 793 | 100% (all settings) |
+| 3 (~10 fps) | 0.13 s (direct conversion of 5 frames) | 266 | 98.9% (picked a wrong car once) |
+| 3 (~10 fps) | 0.30 s and above | 265 | 100% |
+
+Chose 0.30 s. **Limit:** this clip has one lead the whole time, so it shows the selector does not switch wrongly, not how quickly it switches to a real cut-in.
+
+**Failure handling added** (each tested with fake cameras, 14/14 checks pass; two were confirmed to be non-vacuous, e.g. real frames resuming after a stall and 3,848 real red pixels in the stall banner):
+- **Camera check at startup:** if the camera gives no frames, or only black ones (brightness < 5, what happened today with the wrong index), stop with a message pointing to `camera_scan.py` instead of running on black.
+- **Silent camera:** `grabber.get(..., timeout)` returns a `STALE` marker; the display shows a red `NO CAMERA FRAMES` banner instead of a frozen picture.
+- **Crashed or stuck model thread:** the worker catches any exception, stores it and sets `done`, so the display loop exits with a message (before this, a dead thread left an ever-older overlay on screen forever). If the newest model result is older than 1 s, the overlay is hidden and `MODEL STALLED` is drawn: **an old TTC on a new picture is worse than no TTC.**
+- **Clean shutdown:** the raw recording, times CSV and log are written in `finally` blocks, so a model error, `q`, or closing the window with the X button still saves the drive. (A power loss or a hard kill of the process would still lose the video.)
+- **Mounting:** `--rotate {0,90,180,270}` (applied in the grabber, so the raw recording is upright too), `--lane-offset`, `--band`, and live keys `a/d` (move the lane band) and `w/s` (widen/narrow). The HUD shows the current lane values and they are printed at exit to reuse. Reason: the lane band is a fraction of the frame width centered on the frame, which is only right if the phone is mounted centered, and the field of view differs between the 4:3 and 16:9 streams.
+- **Defaults for the car:** camera `imgsz` 640 (files stay 1280), capture 1280x720, `--save-raw NAME` also writes `NAME_live_log.csv` automatically, and a startup reminder that this is a research prototype, not a safety system, and that the driver must not use the laptop while driving.
+
+**Not tested (cannot be, from WSL):**
+- The real Iriun stream at the new 1280x720 default (was only tested at 640x480 and via a probe at 720p/1080p). Check model fps stays ~10.
+- The cost of writing the raw video alongside the live model on the real laptop.
+- Running for a long time: heat/CPU throttling, USB power, disk space, the phone overheating on a windshield in the sun.
+- The on-screen banners and key handling in a real window (drawing and key logic were tested, the window itself was not; WSL has no display here).
+- Real driving: curves, lane changes, cut-ins, night, glare.
+
+**Pre-drive checklist:**
+1. Laptop plugged in, Windows power mode "Best performance", other apps closed (especially the Windows Camera app). `git pull`, `uv sync`.
+2. Start Iriun in the working order (phone app first, then the Windows client) and confirm the phone's picture in the Iriun window.
+3. Phone in landscape, centered, level, lens clear of dashboard reflections; do-not-disturb on; charging.
+4. **Parked test:** `uv run python live.py --source 1 --show --save-raw outputs/parked`. Check the picture is upright (else add `--rotate`), align the two white lane lines with your lane using a/d/w/s, and check display ~28 fps / model ~10 fps.
+5. Drive: a **passenger** runs `uv run python live.py --source 1 --show --save-raw outputs/drive1 --lane-offset X --band Y` (X and Y from step 4). End with `q` (not by closing the laptop).
+6. Afterwards confirm `outputs/drive1.mp4`, `outputs/drive1_times.csv` and `outputs/drive1_live_log.csv` exist; then replay with `--source outputs/drive1.mp4 --times outputs/drive1_times.csv --stride 3`.
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->
