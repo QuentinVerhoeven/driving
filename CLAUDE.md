@@ -4,7 +4,7 @@ A computer vision + sensor-fusion system that analyzes dashcam video and phone G
 
 Two deliverables matter equally:
 
-A live demo video: the system running in real time on a laptop in a car, with live boxes, TTC, and an audio alert.
+A live demo video: the system running in real time on a laptop in a car, with live boxes and TTC.
 Quantitative evaluation: accuracy numbers against ground truth, reported in a README results table.
 About me and how to work with me
 I'm a student learning ML/CV. I need to understand and explain every part of this in interviews.
@@ -50,7 +50,7 @@ Roadmap
 Week	Milestone
 1	Detection + tracking on a recorded clip (track.py)
 2	Lead-vehicle selection + TTC on recorded clips, first TTC plot
-3	First live version: phone on windshield streaming to the laptop as a webcam, live boxes + TTC + audio alert
+3	First live version: phone on windshield streaming to the laptop as a webcam, live boxes + TTC overlay
 4	GPS/accelerometer logging, calibration, distance, headway, core events (tailgating, hard braking, rapid closing)
 5	Speeding detection (GPS + OSM speed limits) -- cheap, reuses week 4's GPS log
 6	Pothole detection: dataset + fine-tuned detector + GPS map (Folium)
@@ -62,6 +62,6 @@ No React/FastAPI, no database, no cloud deployment, no Docker (for now), no cust
 
 Current status
 
-Week 2 complete. track.py runs YOLO + tracking on a video and writes outputs/<clip>_tracked.mp4 and outputs/<clip>_tracks.csv (columns: frame, time_s, track_id, cls, conf, x1, y1, x2, y2, w, h). --conf default is 0.4 (not 0.5 -- see NOTES.md, 0.5 blocked ByteTrack's own occlusion-recovery thresholds and caused real gaps in the lead car's track). In explore.ipynb: automatic lead-vehicle selection (lane-band +-10% of frame width + area-based pick + self-detection filter + temporal hysteresis, 100% correct on clip1_30s, no manual ID picking) now feeds directly into TTC from box-width expansion, smoothed with a hand-rolled Kalman filter (state = [width, dw/dt]) -- the two pieces are wired together end to end and re-validated against real footage. Next: Week 3, first live version (phone on windshield streamed to the laptop, live boxes + TTC + audio alert). Setting up native Windows Python (uv + git installed, repo cloned) and checking raw camera FPS with webcam_check.py before adding YOLO.
+Week 2 complete. track.py runs YOLO + tracking on a video and writes outputs/<clip>_tracked.mp4 and outputs/<clip>_tracks.csv (columns: frame, time_s, track_id, cls, conf, x1, y1, x2, y2, w, h). --conf default is 0.4 (not 0.5 -- see NOTES.md, 0.5 blocked ByteTrack's own occlusion-recovery thresholds and caused real gaps in the lead car's track). In explore.ipynb: automatic lead-vehicle selection (lane-band +-10% of frame width + area-based pick + self-detection filter + temporal hysteresis, 100% correct on clip1_30s, no manual ID picking) now feeds directly into TTC from box-width expansion, smoothed with a hand-rolled Kalman filter (state = [width, dw/dt]) -- the two pieces are wired together end to end and re-validated against real footage. Next: Week 3, first live version (phone on windshield streamed to the laptop, live boxes + TTC overlay). Setting up native Windows Python (uv + git installed, repo cloned) and checking raw camera FPS with webcam_check.py before adding YOLO.
 
 <!-- Update this section as the project progresses. -->
