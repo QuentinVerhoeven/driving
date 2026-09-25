@@ -284,4 +284,25 @@ Both pushed the KITTI/BDD100K evaluation + accident-anticipation stretch work ba
 
 ---
 
+## 2026-09-24 (cont.) — Week 3, live loop step 2: lead selection running per frame
+
+**What changed in `live.py`.** Each frame's YOLO output now goes through `LeadSelector`, and the chosen lead is drawn as a thick green `LEAD id N` box, with the two lane-band lines in white.
+
+**Pieces and why:**
+- **`to_boxes(r)`:** Ultralytics returns tensors (`r.boxes.id`, `r.boxes.xyxy`); `LeadSelector` wants a list of `Box` objects. `r.boxes.id` is `None` when nothing is tracked, which becomes an empty list, so the selector counts a missing frame instead of crashing.
+- **One `LeadSelector` created before the loop.** Its state (current lead, challenger streak, missing streak) has to persist across frames. Creating it inside the loop would wipe its memory each frame and silently turn hysteresis off, which is the whole reason for the streaming refactor. It takes the frame size from the source, so nothing is hardcoded to 4K.
+- **Drawing the lane band.** Lets you answer "why wasn't this car picked?" by eye. A debugging aid, not part of the algorithm.
+
+**Result** (first 300 frames of `clip1_30s`, frame-by-frame tracking): a single car, ID 4, was lead for 217/300 frames. Checked on actual frames:
+- Frame 60: LEAD box on the grey car in our lane. A larger white car to the right is outside the band and correctly ignored (this is why the lane band is applied before the area pick).
+- Frame 200: no lead drawn. ID 4 has drifted just left of the band while the road curves. This is the same ~2.8 s stretch found in the notebook (see the wiring-step-2 note above), so the live version matches the batch behavior. Not a bug; it is a limitation of using a fixed band as a lane proxy on curves.
+
+**Observation:** the same car got the same ID (4) when tracked frame by frame with `persist=True` as in the whole-video run of `track.py`, which is a good sign that per-frame tracking behaves like streaming mode.
+
+**Known cosmetic issue:** Ultralytics' default label text is large on a 4K frame and labels overlap. Irrelevant at phone resolution, left alone.
+
+**Next:** step 3, run `TTCKalman` on the lead's width in the loop using real timestamps, and overlay the TTC number.
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->
