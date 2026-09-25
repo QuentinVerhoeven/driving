@@ -240,4 +240,26 @@ Both pushed the KITTI/BDD100K evaluation + accident-anticipation stretch work ba
 
 ---
 
+## 2026-09-24 (cont.) — Week 3: lead selection + Kalman TTC rewritten for streaming (`lead_ttc.py`)
+
+**Scope change:** the audio alert is dropped from the live demo. Week 3 now ends at live boxes + a TTC overlay. (CLAUDE.md still mentions the alert in three places and needs updating.)
+
+**Why a rewrite.** In `explore.ipynb` everything ran in batch over the whole CSV (group by frame, look at any frame at any time). A live camera gives one frame at a time and no future, so anything that depends on earlier frames has to be stored between calls. Moved the logic into `lead_ttc.py` as two stateful classes:
+- `LeadSelector.update(boxes)`: the lane band, area pick and self-detection filter are stateless. The hysteresis (current lead, challenger + streak, missing streak) is the state the notebook kept in loop variables and is now on `self`.
+- `TTCKalman.update(width, t, track_id)`: keeps `x = [width, rate]`, `P` and the last timestamp. `Q` scales with `dt` (as in the notebook), so a longer gap between measurements makes it trust its own prediction less.
+
+**Verification.** Streamed the recorded `clip1_30s` tracks through the new classes one frame at a time and compared against the notebook's batch output (by running the notebook cells themselves): same 793 frames picked, same track IDs (100% ID 4), width/rate/TTC identical to ~1e-14. Problem hit on the way: a 0.1 px width difference. Cause was only CSV rounding (`w` is stored to 0.1 px, and recomputing `x2 - x1` from separately rounded coordinates differs). Not a logic bug, and it doesn't arise live because boxes come straight from YOLO.
+
+**Issue found and fixed: the Kalman filter wasn't reset when the lead changed.** The state describes one physical car. If the lead switches from a 200 px car to a closer 300 px car, the filter reads the 100 px jump as a huge closing speed and TTC collapses, a false near-collision. It never showed up on `clip1_30s` (lead is always ID 4), but lane changes in live traffic would trigger it. Same problem when the road empties and a new car appears later.
+- Fix: `TTCKalman` remembers which `track_id` its state belongs to and re-initializes (`x = [new width, 0]`, large `P`) when that changes. TTC is `nan` for the first frame after a reset, which I prefer to a wrong number.
+- Considered and rejected: resetting after a long time gap. On this clip the lead leaves the lane band for 2.77 s and returns as the same car (ID 4), and the filter handles it correctly via `Q * dt`. A gap-based reset would wipe good state and change the validated results. An ID-change rule handles both cases without that cost.
+- Synthetic test: 200 px car for 1 s, then a 300 px car with a new ID. Without the reset, TTC dips to ~2.3 s (false alarm). With the reset, no TTC is reported after the switch. Re-ran the `clip1_30s` comparison afterwards: still identical, since there are no ID changes.
+- Remaining downside: if the tracker briefly loses the lead and gives the *same* physical car a new ID, we reset unnecessarily and lose a few frames of smoothing. It fails safe (no estimate rather than a wrong one).
+
+**Known limitation:** `LeadSelector` keeps `current_lead` set while the lane band is empty and only switches when a candidate next appears (after `LOST_STREAK` missed frames). The selection is correct; the stale-state problem was on the Kalman side and is covered by the ID-change reset.
+
+**Next:** live loop that reads frames from a video file (swap to the phone camera index later), then retuning at 720p/1080p.
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->
