@@ -14,12 +14,14 @@
 
 import argparse
 import csv
+import statistics
 import sys
 import time
 from collections import deque
 from pathlib import Path
 
 import cv2
+import numpy as np
 from ultralytics import YOLO
 
 from lead_ttc import BAND_HALF_WIDTH, Box, LeadSelector, TTCKalman
@@ -87,7 +89,8 @@ def main():
         raise SystemExit(f"Could not open source {args.source}")
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    reported_fps = cap.get(cv2.CAP_PROP_FPS)
+    src_fps = reported_fps if reported_fps > 0 else 30.0  # cameras often report 0 or -1 (unknown); `or 30.0` would not catch -1
     print(f"Source: {width}x{height} at {src_fps:.1f} fps")
 
     writer = None
@@ -96,6 +99,10 @@ def main():
         writer = cv2.VideoWriter(str(args.out), cv2.VideoWriter_fourcc(*"mp4v"), src_fps, (width, height))
 
     model = YOLO(args.model)
+    # The very first inference is slow (lazy initialization, ~30 s on the Windows laptop). Run one on a blank
+    # frame now so that cost is paid before the camera starts being timed, not on the first live frame.
+    print("Warming up the model...")
+    model.predict(np.zeros((height, width, 3), dtype=np.uint8), imgsz=args.imgsz, verbose=False)
     selector = LeadSelector(width, height)  # created ONCE, outside the loop: its memory must survive across frames
     kalman = TTCKalman()                    # also created once: holds [width, rate] between frames
     is_camera = args.source.isdigit()
@@ -172,7 +179,7 @@ def main():
     elapsed = time.time() - start
     if frame_idx:
         print(f"\n{frame_idx} frames in {elapsed:.1f}s = {frame_idx / elapsed:.1f} fps end to end")
-        print(f"YOLO + tracker: {sum(yolo_ms) / len(yolo_ms):.0f} ms/frame on average")
+        print(f"YOLO + tracker: {statistics.median(yolo_ms):.0f} ms/frame (median)")
         print(f"Lead picks (track id -> frames): {lead_counts}")
 
 

@@ -349,4 +349,25 @@ Both pushed the KITTI/BDD100K evaluation + accident-anticipation stretch work ba
 
 ---
 
+## 2026-09-25 (cont.) — Week 3: first live run on the phone stream, and what the numbers mean
+
+**Setup:** phone via Iriun (`--source 1`, DirectShow), OpenCV's default 640x480, `imgsz 640`, on the Windows laptop. The phone was filming a video of cars on a screen, so this is a rough test (screen glare, perspective, cuts between scenes), not a real drive.
+
+**Results:**
+- Camera alone (`webcam_check.py --camera 1`): 30 fps, brightness ~100-150 depending on the scene.
+- Full loop (`live.py`): YOLO + tracker ~85-90 ms/frame -> ~11 fps steady. So we process about 1 in 3 of the camera's frames. Visible lag when waving a hand: small.
+- The end-of-run summary said 7.0 fps / 137 ms average, which was **misleading**: the very first YOLO call took ~30 s (one-time lazy initialization), and the average included it. Steady-state numbers are the rolling ones (~11 fps, ~87 ms).
+- Lead selection picked 8 different track IDs over 660 frames. Not meaningful on a screen video with scene changes; needs a real drive to judge.
+
+**Fixes made from this run:**
+1. `CAP_PROP_FPS` returns -1 for this camera. `cap.get(...) or 30.0` doesn't catch it (-1 is truthy), which would have broken `--out` video writing. Now: use the reported value only if `> 0`.
+2. Warm-up: one inference on a blank frame before the loop, so the ~30 s startup isn't paid on the first live frame, and the wall clock used for TTC starts after it.
+3. Summary now reports the **median** YOLO time, not the mean: one slow outlier no longer distorts it. (Lesson: use a median for latency numbers with occasional huge outliers.)
+
+**Open risk (not yet confirmed): stale frames from the camera buffer.** The camera produces 30 fps but we consume ~11 fps. If the driver queues frames and `cap.read()` returns the oldest, the picture lags reality, and worse, TTC timestamps could be wrong: consecutive frames are really ~33 ms apart in the world, but the wall clock between our reads is ~90 ms, so dt would be overstated ~2.7x, making the estimated closing rate ~2.7x too small and TTC ~2.7x too large. If DirectShow instead drops old frames, dt is right. I don't know which it does. The standard fix is a background thread that reads the camera continuously, stamps each frame with the capture time, and keeps only the newest; the main loop then always processes the latest frame with its true timestamp. That also removes the lag. Next step.
+
+**Also to decide:** which capture size to request (1280x720 or 1080p vs the 640x480 default), balancing detection of distant cars against decode cost. YOLO cost depends on `imgsz`, not the capture size, so a larger capture mostly costs decode time, but this is untested.
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->
