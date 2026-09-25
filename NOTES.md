@@ -262,4 +262,26 @@ Both pushed the KITTI/BDD100K evaluation + accident-anticipation stretch work ba
 
 ---
 
+## 2026-09-24 (cont.) — Week 3, live loop step 1: per-frame YOLO + tracking + FPS (`live.py`)
+
+**What it is.** The bare live loop, with no lead selection or TTC yet: open a source, read one frame, run YOLO + tracker on it, draw boxes, measure FPS. Building it one layer at a time so each piece can be checked on its own.
+
+**Design decisions and why:**
+- **One code path for file and camera.** `cv2.VideoCapture(source)` accepts a path or an integer camera index, so `--source data/raw/clip1_30s.mov` and `--source 0` run the same loop. Everything can be built and tested in WSL on recorded clips now, and the phone is a one-argument swap once the USB cable is available.
+- **`model.track(frame, persist=True)` per frame.** `track.py` handed Ultralytics the whole video with `stream=True` and it ran the loop. Live, we own the loop and call `track()` once per frame. `persist=True` tells it to keep ByteTrack's state between calls. Without it, the tracker restarts every call and IDs change every frame. (`track()` returns a list, one `Results` per image, hence `[0]`.)
+- **Cross-platform camera backend.** `cv2.CAP_DSHOW` only exists as a sensible choice on Windows, so it is only used when `sys.platform == "win32"`. Same file works in WSL (files) and native Windows (camera).
+- **Timing YOLO separately from the whole loop.** Same idea as `webcam_check.py`: if the total is slow, the two numbers show whether the model or the rest (decode, drawing, writing) is the bottleneck.
+- **`--show`, `--out`, `--max-frames`.** WSL may not have a display, so a window is optional and the annotated video can be saved instead. `--max-frames` allows short benchmarks.
+
+**First measurement** (60 frames of the 4K `clip1_30s`, `imgsz=1280`, this machine's CPU, WSL): YOLO + tracker ~111 ms/frame after warm-up (first ~20 frames were ~230 ms, model warm-up), whole loop ~5.6 fps (~180 ms/frame). The ~70 ms gap between them is the rest of the loop: decoding 4K, `r.plot()`, and writing 4K video.
+
+**How to read these numbers:**
+- They are not the live demo's numbers. The phone stream will be 720p/1080p, so decode/draw/write get much cheaper. YOLO's cost depends on `imgsz`, not source resolution, so it should stay about the same.
+- A recorded clip is processed as fast as the CPU allows, so "fps" here is throughput, not real-time. Live, the camera delivers ~30 fps and we would process only ~5-9 of them.
+- **Consequence for TTC:** the time between *processed* frames will be ~0.1-0.2 s, not 1/30 s. The Kalman filter must use real timestamps (video time for files, wall-clock time for a camera), not assume a fixed frame rate. To handle when wiring TTC in.
+
+**Next:** step 2, run `LeadSelector` and `TTCKalman` inside this loop and draw the lead box and TTC on the frame.
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->
