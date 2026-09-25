@@ -393,4 +393,31 @@ Both pushed the KITTI/BDD100K evaluation + accident-anticipation stretch work ba
 
 ---
 
+## 2026-09-25 (cont.) — Week 3: decoupling display from inference (the real cause of the lag)
+
+**What the measurements said.** After the grabber thread, the real-phone run reported frame age at processing start of median 19 ms / max 44 ms (fresh), 748 of 1196 camera frames dropped, ~10 fps processed, and it *felt laggier*. `webcam_check.py` (same camera, no YOLO) felt much less laggy. So the delay was added by our own pipeline, not by the phone, Iriun or USB. **The grabber thread was still the right design (it fixed the timestamps) but it did not cure the perceived lag**: the age I measured is the age when processing *starts*, and I had not accounted for the window itself only updating after each ~90 ms YOLO call.
+
+**Root cause:** the window was redrawn only when YOLO finished, so the display ran at ~10 fps and every picture was already >= 90 ms old when shown. `webcam_check.py` shows a fresh frame every ~33 ms.
+
+**Fix: two loops.**
+- **Display loop (main thread, ~30 fps):** newest camera frame -> *copy* -> draw the latest available boxes/TTC on it -> show.
+- **`InferenceWorker` (background thread, ~10 fps):** whenever free, takes the newest frame, runs YOLO + lead selection + Kalman, publishes the latest `FrameResult`.
+- Result: the picture is as live as the camera allows, and only the overlay trails by about one YOLO call (~100 ms). Standard practice in real-time vision. TTC values are unchanged: same timestamps (capture time), same filter.
+
+**Code changes (`live.py` restructured into small pieces):**
+- `Pipeline.process(frame, t) -> FrameResult`: YOLO -> `LeadSelector` -> `TTCKalman`. No threads, no drawing. Used by both file and camera modes.
+- `draw_overlay(img, result, info)`: draws lane band, every box + track id, the lead in green and the TTC readout. **Replaces Ultralytics' `r.plot()`**, because the overlay is now drawn on a *newer* frame than the one YOLO saw and `r.plot()` can only draw on its own frame. Sizes scale with frame width, so text is readable at 640 px and at 4K (also fixes the oversized-label problem noted earlier). Boxes now show `id N`, not class + confidence.
+- The display loop draws on `frame.copy()`: the worker may still be reading that frame inside YOLO, and drawing in place would paint boxes into YOLO's input (a race between threads).
+- `LatestFrameGrabber.get()` now serves several consumers (display + worker), each with its own `last_seq`, via `notify_all`.
+- File mode keeps its sequential every-frame behavior and uses the same `Pipeline` + `draw_overlay`, so most of the new code is testable in WSL.
+- `--log` columns changed: `processed_frame` (count of processed frames) instead of the camera frame index, since frames are now skipped.
+
+**Verification without the phone (WSL):** file mode on 300 frames works (lead picked on 206 frames). Camera mode with a fake 30 fps camera playing the real clip at 640x480, real YOLO: display 27 fps while the model ran at only 2 fps (YOLO ~360 ms there because the fake camera decodes 4K on the same CPU and starves the model, so this is a harsher test than the laptop). Frame age median 17 ms / max 39 ms; all threads exited cleanly; the overlay looked right on a frame (lane band, ids, green lead, HUD, own hood ignored). The lead ID jumped in that test because the model saw frames ~0.5 s apart, which is expected and not representative.
+
+**Not yet verified on the real phone.** Expect: display ~30 fps, model ~10 fps, and much less lag.
+
+**Trade-off to remember:** boxes trail moving objects by ~100 ms. Fine for a car ahead, but visible on fast lateral motion. Faster inference (smaller `imgsz`, ONNX/OpenVINO later) shrinks it.
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->
