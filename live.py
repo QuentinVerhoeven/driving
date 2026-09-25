@@ -13,6 +13,7 @@
 """
 
 import argparse
+import csv
 import sys
 import time
 from collections import deque
@@ -21,7 +22,7 @@ from pathlib import Path
 import cv2
 from ultralytics import YOLO
 
-from lead_ttc import BAND_HALF_WIDTH, Box, LeadSelector
+from lead_ttc import BAND_HALF_WIDTH, Box, LeadSelector, TTCKalman
 
 # COCO class IDs we care about (same as track.py)
 VEHICLE_CLASSES = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
@@ -45,15 +46,27 @@ def to_boxes(r):
     return [Box(tid, *corners) for tid, corners in zip(ids, xyxy)]
 
 
-def draw_lead(img, lead, frame_w):
+def ttc_label(ttc):
+    """Text for the overlay. nan = box not growing (or filter just reset), so no meaningful TTC."""
+    if ttc != ttc:      # nan is the only value that is not equal to itself
+        return "TTC --"
+    if ttc > 10:
+        return "TTC >10 s"
+    return f"TTC {ttc:.1f} s"
+
+
+def draw_lead(img, lead, frame_w, ttc=None):
     """Lane band (thin white lines) + the chosen lead car (thick green box)."""
     h = img.shape[0]
     for x in (frame_w / 2 - BAND_HALF_WIDTH * frame_w, frame_w / 2 + BAND_HALF_WIDTH * frame_w):
         cv2.line(img, (int(x), 0), (int(x), h), (255, 255, 255), 2)
     if lead is not None:
         cv2.rectangle(img, (int(lead.x1), int(lead.y1)), (int(lead.x2), int(lead.y2)), (0, 255, 0), 8)
-        cv2.putText(img, f"LEAD id {lead.track_id}", (int(lead.x1), max(int(lead.y1) - 15, 40)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 5)
+        # TTC goes in a fixed corner readout (under the FPS counter), not on the box: over a small distant
+        # box it collided with Ultralytics' own labels and was unreadable
+        if ttc is not None:
+            cv2.putText(img, f"LEAD id {lead.track_id}   {ttc_label(ttc)}", (20, 150),
+                        cv2.FONT_HERSHEY_SIMPLEX, 3, (0, 255, 0), 8)
 
 
 def main():
@@ -65,6 +78,7 @@ def main():
     parser.add_argument("--imgsz", type=int, default=1280)  # YOLO input size; the main speed vs accuracy knob on CPU
     parser.add_argument("--show", action="store_true")  # open a window (needs a display)
     parser.add_argument("--out", type=Path, default=None)  # optionally save the annotated video
+    parser.add_argument("--log", type=Path, default=None)  # optionally save frame/time/width/TTC per frame as CSV
     parser.add_argument("--max-frames", type=int, default=None)  # stop early, for quick benchmarks
     args = parser.parse_args()
 
@@ -83,6 +97,9 @@ def main():
 
     model = YOLO(args.model)
     selector = LeadSelector(width, height)  # created ONCE, outside the loop: its memory must survive across frames
+    kalman = TTCKalman()                    # also created once: holds [width, rate] between frames
+    is_camera = args.source.isdigit()
+    log_rows = []
     lead_counts = {}                        # how many frames each track id was the lead
 
     loop_times = deque(maxlen=30)   # timestamps of the last 30 loop iterations -> smoothed FPS
@@ -108,12 +125,18 @@ def main():
         )[0]  # track() returns a list with one Results per input image
         yolo_ms.append((time.time() - t0) * 1000)
 
+        # Timestamp of this frame: wall clock for a camera, position in the video for a file
+        t = (time.time() - start) if is_camera else frame_idx / src_fps
+
         lead = selector.update(to_boxes(r))
+        ttc = None
         if lead is not None:
             lead_counts[lead.track_id] = lead_counts.get(lead.track_id, 0) + 1
+            _, _, ttc = kalman.update(lead.w, t, lead.track_id)
+            log_rows.append((frame_idx, round(t, 3), lead.track_id, round(lead.w, 1), ttc))
 
         annotated = r.plot()  # frame with boxes + IDs drawn
-        draw_lead(annotated, lead, width)
+        draw_lead(annotated, lead, width, ttc)
 
         loop_times.append(time.time())
         if len(loop_times) > 1:
@@ -137,6 +160,14 @@ def main():
     if writer:
         writer.release()
     cv2.destroyAllWindows()
+
+    if args.log:
+        args.log.parent.mkdir(parents=True, exist_ok=True)
+        with open(args.log, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["frame", "t", "track_id", "width", "ttc"])
+            w.writerows(log_rows)
+        print(f"Saved {args.log}  ({len(log_rows)} rows)")
 
     elapsed = time.time() - start
     if frame_idx:
