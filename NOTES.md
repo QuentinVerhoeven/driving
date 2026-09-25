@@ -329,4 +329,24 @@ Both pushed the KITTI/BDD100K evaluation + accident-anticipation stretch work ba
 
 ---
 
+## 2026-09-25 — Week 3: getting the phone stream into OpenCV (debugging log)
+
+**Symptom.** With the phone streamed through Iriun, `webcam_check.py` showed a black picture at ~1 fps, 640x480, while the Windows Camera app and Iriun's own client showed the phone's video perfectly. So the phone and driver were fine and the problem was between OpenCV and the virtual camera.
+
+**Investigation (each step narrowed it down):**
+1. **`camera_scan.py`:** tries indices 0-5 x DirectShow/Media Foundation, reads for 2 s, reports resolution, FPS and average brightness (0 = black). Result: three cameras. Two gave real video (0 and 2), one gave black at ~1 fps (1). I first *assumed* the healthy 720p one was the phone. Wrong: opening the saved frames showed indices 0 and 2 were both the laptop webcam. **Lesson: look at the picture, don't infer identity from resolution/FPS.**
+2. **`camera_probe.py --index 1`:** tried every backend x resolution x pixel format. Every combination was black, and the camera accepted any resolution even 1080p. A real camera refuses sizes it can't do, so this was a virtual camera accepting requests but getting no frames.
+3. **Device list** (`Get-PnpDevice -Class Camera`) showed both *Camo* and *Iriun Webcam* registered. I guessed index 1 was Camo's idle virtual camera. Wrong again: `pygrabber` (run with `uv run --with`, so it isn't a project dependency) printed the DirectShow device names in OpenCV's index order: `0 Integrated Webcam, 1 Iriun Webcam, 2 Camo`. So index 1 *was* Iriun.
+4. **Fix:** closed other apps that could hold the camera (Windows Camera app), restarted Iriun (phone app first, then Windows client), rechecked. `camera_probe.py --index 1` then gave real pictures in all 18 combinations, up to **1920x1080 at ~30 fps** on both backends.
+
+**What I do NOT know:** which of the changes fixed it, because several were changed at once. Leading suspects: another app holding the virtual camera, or a stale Iriun connection. If it recurs: close the Camera app and any other camera user, restart Iriun in that order, then re-run `camera_probe.py`.
+
+**Takeaways for the code:**
+- Camera index numbers are just DirectShow enumeration order and are not stable identities. Identify the camera by looking at a frame, or list device names with `pygrabber` when it matters.
+- The scripts (`camera_scan.py`, `camera_probe.py`) print brightness, so "black" is a number, not a judgment call.
+- DirectShow (what `live.py`/`webcam_check.py` already use) works fine with Iriun once the stream is healthy, so no backend option was needed.
+- OpenCV's default for this camera is 640x480; asking for a size (1280x720 or 1920x1080) works. Which size to use for the live loop is a speed decision, to be made with the CPU FPS numbers.
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->
