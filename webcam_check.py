@@ -37,10 +37,13 @@ def main():
             print("Failed to read a frame, stopping.")
             break
 
+        brightness = frame.mean()  # 0 = pure black, 255 = pure white; a real road scene is roughly 60-160
         frame_times.append(time.time())
         if len(frame_times) > 1:
             fps = (len(frame_times) - 1) / (frame_times[-1] - frame_times[0])
-            cv2.putText(frame, f"{fps:.1f} fps", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+            cv2.putText(frame, f"{fps:.1f} fps  brightness {brightness:.0f}", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+            if len(frame_times) == 30 and frame_times[-1] - frame_times[0] > 0 and brightness < 5:
+                print(f"Warning: frames are black (brightness {brightness:.1f}), this is probably the wrong camera index")
 
         cv2.imshow("webcam check", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
