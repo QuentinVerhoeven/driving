@@ -2,3 +2,4 @@
 data/
 outputs/
 *.pt
+__pycache__/
