@@ -370,4 +370,27 @@ Both pushed the KITTI/BDD100K evaluation + accident-anticipation stretch work ba
 
 ---
 
+## 2026-09-25 (cont.) — Week 3: latest-frame grabber thread (fixes camera lag and TTC timestamps)
+
+**Problem.** The live loop was `cap.read()` -> YOLO (~90 ms) -> `cap.read()` ... The camera makes 30 frames/s while we process ~11/s. If the driver queues the extra frames, `read()` returns an *old* frame, so (1) the picture lags reality (seen when waving a hand), and (2) the TTC timestamps would be wrong: consecutive queued frames are ~33 ms apart in the world, but our wall clock sees ~90 ms between reads, so `dt` is overstated ~2.7x, the estimated closing rate ~2.7x too small, and TTC ~2.7x too big. Whether DirectShow really queues that way was not confirmed, but the fix removes the question either way.
+
+**Fix: `LatestFrameGrabber` in `live.py`.** A background thread calls `cap.read()` continuously (so nothing queues) and stores only the newest frame plus `time.time()` at the moment it arrived. The main loop calls `get(last_seq)`, which waits until a frame newer than the last one it processed exists, then returns `(frame, capture_time, seq)`. Frames that arrive while YOLO is busy are dropped on purpose. TTC's timestamp is now the capture time, not the time we finished processing.
+
+**Threading pieces (for the interview):**
+- A `Condition` (lock + wait/notify) protects the shared frame so the two threads never read and write it at the same instant, and lets the main loop *sleep* until the grabber signals a new frame, instead of busy-waiting.
+- The GIL isn't a bottleneck here: `cap.read()` spends its time waiting on the camera (I/O) and releases the GIL while it waits.
+- `seq` (a counter of frames read) is how `get()` knows a frame is new, and the difference between consecutive `seq` values is how many frames we skipped.
+- The thread is a daemon and `stop()` joins it, so the program can exit.
+- When the camera stops, the thread sets `running = False` and notifies, so the main loop wakes and exits instead of hanging.
+
+**Only used for cameras.** For video files we want every frame in order, so files keep the plain `cap.read()` path with `t = frame_idx / fps`.
+
+**How it was verified (no camera available in WSL):** a fake 30 fps camera (frame pixel value = frame number) and a fake 90 ms "YOLO". Results: 150 frames read = 57 processed + 93 skipped (counts add up exactly; ratio matches 33 ms vs 90 ms); every processed frame's content matched its sequence number (no stale or mixed-up frames); frame age when processing started: median 17 ms, max 48 ms, i.e. bounded by one camera frame interval + jitter; clean exit when the camera stops. The file path was re-run and unchanged. **Not yet verified on the real phone stream** (pending).
+
+**New numbers printed at the end of a camera run:** frame age when processing started (median / max) and the number of camera frames dropped vs processed. These are the evidence for "lag is small" and "we process ~1 in 3 frames."
+
+**Limitation:** the capture time is when OpenCV *returned* the frame, not when the sensor exposed it. Any latency inside the phone, Iriun and the USB link before that point is not measured. A constant delay like that doesn't affect `dt` (differences between timestamps), so TTC is unaffected, but it would matter for aligning the video with GPS/accelerometer data in Week 4.
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->

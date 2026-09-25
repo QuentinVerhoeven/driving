@@ -16,6 +16,7 @@ import argparse
 import csv
 import statistics
 import sys
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -37,6 +38,51 @@ def open_source(source):
         backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
         return cv2.VideoCapture(int(source), backend)
     return cv2.VideoCapture(source)
+
+
+class LatestFrameGrabber:
+    """Reads a camera in a background thread and keeps ONLY the newest frame + the time it arrived.
+
+    Why: if the main loop does cap.read() itself, the camera keeps producing frames (30/s) while YOLO
+    is busy (~90 ms), and the driver may queue them. The next read() then returns an OLD frame: the
+    picture lags reality and the timestamps no longer match when the frame really happened.
+    Here the thread drains the camera constantly, so nothing queues up, and get() hands out the newest
+    frame with its true arrival time. Frames that arrive while we are busy are dropped on purpose.
+    """
+
+    def __init__(self, cap):
+        self.cap = cap
+        self.cond = threading.Condition()   # lock + a way to sleep until "a new frame arrived"
+        self.frame = None
+        self.t = None                       # time.time() when the newest frame was read
+        self.seq = 0                        # counts frames read so far, so get() can tell what is new
+        self.running = True
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        while self.running:
+            ok, frame = self.cap.read()     # blocks until the camera delivers; releases the GIL while waiting
+            t = time.time()
+            with self.cond:
+                if not ok:                  # camera stopped: wake the main loop so it can exit
+                    self.running = False
+                else:
+                    self.frame, self.t, self.seq = frame, t, self.seq + 1
+                self.cond.notify_all()
+
+    def get(self, last_seq):
+        """Wait for a frame newer than last_seq. Returns (frame, capture_time, seq), or None if the camera stopped."""
+        with self.cond:
+            while self.running and self.seq == last_seq:
+                self.cond.wait(timeout=1.0)
+            if self.seq == last_seq:        # stopped without anything new
+                return None
+            return self.frame, self.t, self.seq
+
+    def stop(self):
+        self.running = False
+        self.thread.join(timeout=2.0)
 
 
 def to_boxes(r):
@@ -114,10 +160,26 @@ def main():
     frame_idx = 0
     start = time.time()
 
+    # Camera: background grabber that always gives the newest frame. File: plain read(), we want every frame in order.
+    grabber = LatestFrameGrabber(cap) if is_camera else None
+    last_seq = 0
+    skipped = 0        # camera frames that arrived while we were busy and were dropped
+    age_ms = []        # how old each frame was when we started processing it (lag), camera only
+
     while True:
-        ok, frame = cap.read()
-        if not ok:
-            break  # end of file, or the camera stopped giving frames
+        if grabber:
+            got = grabber.get(last_seq)
+            if got is None:
+                break  # camera stopped giving frames
+            frame, t_capture, seq = got
+            skipped += seq - last_seq - 1 if last_seq else 0
+            last_seq = seq
+            age_ms.append((time.time() - t_capture) * 1000)
+        else:
+            ok, frame = cap.read()
+            if not ok:
+                break  # end of file
+            t_capture = None
 
         t0 = time.time()
         # One frame in, tracker state kept between calls thanks to persist=True
@@ -132,8 +194,9 @@ def main():
         )[0]  # track() returns a list with one Results per input image
         yolo_ms.append((time.time() - t0) * 1000)
 
-        # Timestamp of this frame: wall clock for a camera, position in the video for a file
-        t = (time.time() - start) if is_camera else frame_idx / src_fps
+        # Timestamp of this frame: when the camera delivered it (NOT when we finished processing), or its
+        # position in the video for a file. This is the time the Kalman filter's dt is built from.
+        t = (t_capture - start) if is_camera else frame_idx / src_fps
 
         lead = selector.update(to_boxes(r))
         ttc = None
@@ -163,6 +226,8 @@ def main():
         if args.max_frames and frame_idx >= args.max_frames:
             break
 
+    if grabber:
+        grabber.stop()
     cap.release()
     if writer:
         writer.release()
@@ -180,6 +245,9 @@ def main():
     if frame_idx:
         print(f"\n{frame_idx} frames in {elapsed:.1f}s = {frame_idx / elapsed:.1f} fps end to end")
         print(f"YOLO + tracker: {statistics.median(yolo_ms):.0f} ms/frame (median)")
+        if age_ms:
+            print(f"Frame age when processing started: median {statistics.median(age_ms):.0f} ms, "
+                  f"max {max(age_ms):.0f} ms; camera frames dropped: {skipped} (processed {frame_idx})")
         print(f"Lead picks (track id -> frames): {lead_counts}")
 
 
