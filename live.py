@@ -114,7 +114,7 @@ class Pipeline:
         self.lead_counts = {}   # how many frames each track id was the lead
         self.log_rows = []
 
-    def process(self, frame, t):
+    def process(self, frame, t, frame_id):
         t0 = time.time()
         # One frame in; tracker state is kept between calls thanks to persist=True
         r = self.model.track(
@@ -134,7 +134,7 @@ class Pipeline:
         if lead is not None:
             self.lead_counts[lead.track_id] = self.lead_counts.get(lead.track_id, 0) + 1
             _, _, ttc = self.kalman.update(lead.w, t, lead.track_id)
-            self.log_rows.append((self.n, round(t, 3), lead.track_id, round(lead.w, 1), ttc))
+            self.log_rows.append((frame_id, round(t, 3), lead.track_id, round(lead.w, 1), ttc))
         self.n += 1
         return FrameResult(boxes, lead, ttc, t)
 
@@ -167,7 +167,7 @@ class InferenceWorker:
             self.age_ms.append((time.time() - t_capture) * 1000)
 
             # Timestamp = when the camera delivered the frame (NOT when we finish processing): the Kalman dt uses it
-            result = self.pipeline.process(frame, t_capture - self.t_origin)
+            result = self.pipeline.process(frame, t_capture - self.t_origin, last_seq)
             with self.lock:
                 self.latest = result
 
@@ -238,18 +238,41 @@ def draw_overlay(img, res, info=None):
 
 
 def run_file(cap, pipeline, writer, args, src_fps):
-    """Every frame in order, processed one at a time. Timestamp = position in the video."""
+    """Frames in order. Every `--stride`-th frame goes through the model (stride 3 ~ what the live loop manages
+    on the laptop CPU); the frames in between are still shown/saved, with the latest results drawn on them,
+    exactly like camera mode. Timestamps come from the video container, so variable-frame-rate phone videos
+    (where frame_index / fps is wrong) still give correct dt for the Kalman filter."""
     loop_times = deque(maxlen=30)
     frame_idx = 0
+    res = None
+    fps = 0.0
+    last_t = -1.0
+    saved_times = None
+    if args.times:  # times recorded live by --save-raw: the truth, since the saved video has a fixed nominal frame rate
+        with open(args.times) as f:
+            saved_times = [float(row["t"]) for row in csv.DictReader(f)]
     while True:
         ok, frame = cap.read()
         if not ok:
             break  # end of file
-        res = pipeline.process(frame, frame_idx / src_fps)
+        # Time of this frame in seconds: from the saved capture times if given, else from the video container.
+        # If that gives nothing usable (not increasing), fall back to one nominal frame after the previous one.
+        if saved_times is not None:
+            t = saved_times[frame_idx] if frame_idx < len(saved_times) else last_t + 1.0 / src_fps
+        else:
+            t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+        if t <= last_t:
+            t = last_t + 1.0 / src_fps
+        last_t = t
 
-        loop_times.append(time.time())
-        fps = (len(loop_times) - 1) / (loop_times[-1] - loop_times[0]) if len(loop_times) > 1 else 0.0
-        draw_overlay(frame, res, f"{fps:.1f} fps")   # nothing else uses this frame, so drawing in place is fine
+        if frame_idx % args.stride == 0:
+            res = pipeline.process(frame, t, frame_idx)
+            loop_times.append(time.time())
+            if len(loop_times) > 1:
+                fps = (len(loop_times) - 1) / (loop_times[-1] - loop_times[0])
+            if pipeline.n % 20 == 0:
+                print(f"  processed {pipeline.n} (frame {frame_idx}): {fps:.1f} fps, YOLO {statistics.median(pipeline.yolo_ms[-20:]):.0f} ms/frame")
+        draw_overlay(frame, res, f"model {fps:.1f} fps (stride {args.stride})")   # nothing else uses this frame: draw in place
 
         if writer:
             writer.write(frame)
@@ -258,9 +281,7 @@ def run_file(cap, pipeline, writer, args, src_fps):
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
         frame_idx += 1
-        if frame_idx % 20 == 0:
-            print(f"  frame {frame_idx}: {fps:.1f} fps overall, YOLO {statistics.median(pipeline.yolo_ms[-20:]):.0f} ms/frame")
-        if args.max_frames and frame_idx >= args.max_frames:
+        if args.max_frames and pipeline.n >= args.max_frames:
             break
     return {}
 
@@ -274,12 +295,22 @@ def run_camera(cap, pipeline, writer, args):
     disp_times = deque(maxlen=30)
     last_seq = 0
     shown = 0
+    raw_writer, raw_times = None, []
     try:
         while not worker.done:
             got = grabber.get(last_seq)
             if got is None:
                 break  # camera stopped
-            frame, _, last_seq = got
+            frame, t_capture, last_seq = got
+
+            if args.save_raw:
+                if raw_writer is None:  # created on the first frame so we know the real size
+                    args.save_raw.parent.mkdir(parents=True, exist_ok=True)
+                    raw_writer = cv2.VideoWriter(str(args.save_raw.with_suffix(".mp4")), cv2.VideoWriter_fourcc(*"mp4v"),
+                                                 30.0, (frame.shape[1], frame.shape[0]))
+                raw_writer.write(frame)  # the untouched camera frame, before any drawing
+                raw_times.append(t_capture - t_origin)  # same clock the live TTC uses, so a replay matches
+
             img = frame.copy()  # the worker may still be reading `frame` inside YOLO: never draw on it in place
 
             disp_times.append(time.time())
@@ -296,6 +327,14 @@ def run_camera(cap, pipeline, writer, args):
     finally:
         worker.stop()
         grabber.stop()
+        if raw_writer:
+            raw_writer.release()
+            times_path = args.save_raw.with_name(args.save_raw.stem + "_times.csv")
+            with open(times_path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["frame", "t"])
+                w.writerows(enumerate(raw_times))
+            print(f"Saved raw feed: {args.save_raw.with_suffix('.mp4')} + {times_path} ({len(raw_times)} frames)")
     return {"shown": shown, "read": grabber.seq, "age_ms": worker.age_ms}
 
 
@@ -306,6 +345,11 @@ def main():
     parser.add_argument("--tracker", default="bytetrack.yaml")
     parser.add_argument("--conf", type=float, default=0.4)  # same default as track.py, see NOTES.md
     parser.add_argument("--imgsz", type=int, default=1280)  # YOLO input size; the main speed vs accuracy knob on CPU
+    parser.add_argument("--stride", type=int, default=1)  # files only: run the model on every Nth frame (3 ~ live speed on CPU)
+    parser.add_argument("--width", type=int, default=None)   # cameras only: ask for a capture size, e.g. 1280 x 720
+    parser.add_argument("--height", type=int, default=None)
+    parser.add_argument("--save-raw", type=Path, default=None)  # cameras only: save the unannotated feed as NAME.mp4 + NAME_times.csv
+    parser.add_argument("--times", type=Path, default=None)     # files only: per-frame capture times saved by --save-raw
     parser.add_argument("--show", action="store_true")  # open a window (needs a display)
     parser.add_argument("--out", type=Path, default=None)  # optionally save the annotated video
     parser.add_argument("--log", type=Path, default=None)  # optionally save time/width/TTC of the lead per processed frame as CSV
@@ -315,7 +359,10 @@ def main():
     cap = open_source(args.source)
     if not cap.isOpened():
         raise SystemExit(f"Could not open source {args.source}")
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    if args.source.isdigit() and args.width and args.height:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)     # a request, not a promise: the driver may pick another size
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))        # always read back what we really got
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     reported_fps = cap.get(cv2.CAP_PROP_FPS)
     src_fps = reported_fps if reported_fps > 0 else 30.0  # cameras often report 0 or -1 (unknown); `or 30.0` would not catch -1
@@ -349,12 +396,12 @@ def main():
         args.log.parent.mkdir(parents=True, exist_ok=True)
         with open(args.log, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["processed_frame", "t", "track_id", "width", "ttc"])
+            w.writerow(["frame", "t", "track_id", "width", "ttc"])
             w.writerows(pipeline.log_rows)
         print(f"Saved {args.log}  ({len(pipeline.log_rows)} rows)")
 
     if pipeline.n:
-        print(f"\n{pipeline.n} frames processed in {elapsed:.1f}s = {pipeline.n / elapsed:.1f} fps")
+        print(f"\n{pipeline.n} frames run through the model in {elapsed:.1f}s = {pipeline.n / elapsed:.1f} fps")
         print(f"YOLO + tracker: {statistics.median(pipeline.yolo_ms):.0f} ms/frame (median)")
         if stats.get("age_ms"):
             print(f"Camera: {stats['read']} frames read, {stats['shown']} shown ({stats['shown'] / elapsed:.0f} fps display), "
