@@ -10,8 +10,11 @@
     uv run python camera_scan.py
 """
 
+import os
 import sys
 import time
+
+os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")  # must be set before importing cv2: hides the per-frame MSMF warning spam
 
 import cv2
 
