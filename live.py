@@ -108,7 +108,7 @@ class Pipeline:
         self.model = model
         self.args = args
         self.selector = LeadSelector(frame_w, frame_h)  # created ONCE: its memory must survive across frames
-        self.kalman = TTCKalman()                       # also once: holds [width, rate] between frames
+        self.kalman = TTCKalman(frame_w)                 # also once: holds [width, rate] between frames
         self.n = 0              # frames processed so far
         self.yolo_ms = []       # how long each YOLO call took
         self.lead_counts = {}   # how many frames each track id was the lead

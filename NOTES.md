@@ -475,4 +475,35 @@ The plot shows the box *widths* from the two runs almost coincide, so detection 
 
 ---
 
+## 2026-09-25 (cont.) — Kalman filter redesigned: frame-rate- and resolution-independent (`TTCKalman` in `lead_ttc.py`)
+
+**Why.** Two hidden assumptions in the original filter (see the previous entry): its constants were in *pixels* on 4K boxes and its process noise `diag(q*dt)` was tuned at ~30 fps. The live phone stream is 640-1080 px wide (boxes 3-6x smaller in pixels) and the model runs at ~10 fps (measurements ~0.1 s apart), so the same constants meant something different in the real setting.
+
+**Changes (decided together, since we would retune anyway):**
+1. **Width is filtered in units of frame width** (`width / frame_w`), not pixels. `TTCKalman(frame_w)` now takes the frame width. TTC is a ratio so it is unchanged, and the returned width/rate are converted back to pixels. Check: the same scene at a third of the size gives identical TTC.
+2. **Process noise is the textbook continuous-white-noise form** `Q = q * [[dt^3/3, dt^2/2], [dt^2/2, dt]]` instead of `diag(q_width*dt, q_rate*dt)`. The old form ignored the coupling between rate uncertainty and width uncertainty and did not scale correctly with the time step; the new one makes the filter respond to the same real-time changes at any frame rate.
+3. **Constants:** `q = 5e-5`, `R = 2e-5` (relative-width units; R means sigma ~0.0045 of the frame width, ~17 px on a 4K frame, ~3 px at 640).
+
+**How the constants were chosen (offline, on the lead-width series, so no re-detection):** grid search over `q` and `R` on two datasets (this session's 640-imgsz run and the earlier 1280-imgsz tracks, same clip), scored on the IoU of the "TTC < 8 s" frame sets by two criteria: **fidelity** (new filter at every frame vs the original filter, our only reference until we have ground truth) and **consistency** (new filter using every 3rd measurement vs using every measurement). Selected the best worst-case of the two. Result: fidelity 0.80 / 0.96 (per dataset), consistency 0.55 / 0.80, versus the original filter's own consistency of 0.30 / 0.74. It is a broad ridge (`q/R ~ 2.5`; `q=1e-4, R=5e-5` and `q=3e-4, R=1e-4` also score well), not a knife-edge, which is reassuring against overfitting to one clip.
+
+**End-to-end result** (real pipeline, `clip1_30s`, `imgsz 640`, TTC < 8 s):
+
+| | every frame | every 3rd frame | median TTC difference on shared frames |
+|---|---|---|---|
+| original filter | 6 events / 64 frames | 1 event / 1 frame | 4.31 s |
+| new filter | 6 events / 69 frames | 2 events / 10 frames | 1.71 s |
+
+At every frame the new filter reproduces the original's behavior; at live rate it went from essentially blind to catching the big events. **Not fully solved:** at 3x lower sampling it underestimates severity (the biggest event's minimum TTC is 5.6 s vs 3.0 s at every frame) and misses short dips (~0.3 s) entirely. That is an information limit (fewer samples plus smoothing cannot resolve a 0.3 s blip), not something more tuning fixes; the fix is a faster model (smaller `imgsz`, ONNX/OpenVINO) or accepting it. Also worth noting: at stride 3 the tracker sees every 3rd frame too, so tracks and lead picks differ slightly from stride 1.
+
+**Verified:** class output equals an independent re-implementation used for tuning (354 defined TTC values compared); identical TTC at a third of the resolution; no false alarm when the lead switches to a different car (still resets on `track_id` change); a synthetic car closing at a known rate gives 8.03 s vs the true 8.0 s.
+
+**A mistake worth remembering:** my first version of that test built a new `TTCKalman(...)` inside the list comprehension, so every row was a "first measurement" and the whole output was `nan`. The resolution-independence check then *passed vacuously* (`nan == nan` with `equal_nan=True`); only the comparison against the reference failed, which is how I found it. Fixed, and the tests now print how many defined values they compared. **Lesson:** a test that passes on all-nan output is worthless; always check that the compared arrays actually contain values.
+
+**Caveats:**
+- **Not tuned against ground truth.** "Matches the old filter and is consistent across frame rates" is a proxy. The absolute noise level should be tuned during the KITTI/labeled-clip evaluation, ideally at the deployed frame rate.
+- `explore.ipynb` still has the original filter (kept as the record of how it was built). The earlier "streaming code equals notebook" comparison no longer applies, since the filter was changed deliberately.
+- The `LeadSelector` streaks (10 and 5 frames) are still counted in processed frames, so they still mean 3x more real time at stride 3, and the lead ID changes more at `imgsz 640` than at 1280. Both still open.
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->
