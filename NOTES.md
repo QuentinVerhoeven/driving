@@ -439,4 +439,40 @@ Subjective: lag feels better than the version where display waited for YOLO (bef
 
 ---
 
+## 2026-09-25 (cont.) — Week 3: raw recording/replay, stride, and a real finding: the Kalman TTC is frame-rate dependent
+
+**Recording route (decided):** the drive is recorded *through Iriun on the laptop* (not with the phone's own camera app). So `live.py` needed a way to keep the raw feed for offline replay.
+
+**Added to `live.py`:**
+- `--save-raw NAME` (camera): saves the *unannotated* frames to `NAME.mp4` and each frame's real capture time to `NAME_times.csv`. `--times NAME_times.csv` (file mode) makes a replay use those times. Why the times file: the Iriun stream has irregular frame spacing (~28 fps, some frames dropped), but a saved video has a fixed nominal frame rate, so replay would run at the wrong speed and corrupt every TTC `dt`. Verified with a jittery fake camera (real spacing 35-894 ms vs nominal 33 ms): video frames == time rows, and every replayed timestamp equals its recorded capture time.
+- `--stride N` (file mode): run the model on every Nth frame, still showing/saving the frames in between with the latest overlay, exactly like camera mode. Lets a recorded clip reproduce the live rate (stride 3 ~ our ~10 fps).
+- `--width/--height` (camera): ask for a capture size; the actual size is read back after (a request, not a promise).
+- File-mode timestamps now come from the video container (`CAP_PROP_POS_MSEC`), not `frame_idx / fps`, so variable-frame-rate phone videos give correct `dt`. On `clip1_30s` (constant frame rate) the two agree to 0.0000 s, so this is a safeguard that has **not** been exercised on an actual variable-frame-rate file. A fallback keeps timestamps increasing if the container gives nothing usable.
+- `--log` now has a `frame` column (source frame index / camera sequence number) so runs at different strides can be aligned.
+- `plot_ttc.py`: plots lead box width and Kalman TTC over time from one or more `--log` CSVs (for comparing settings).
+
+**Finding: TTC at the live frame rate largely stops detecting closing events.** `clip1_30s`, `imgsz 640`, same code, only `--stride` changed:
+
+| | stride 1 (every frame) | stride 3 (live-like) |
+|---|---|---|
+| lead frames | 734 | 241 |
+| closing events (Kalman TTC < 8 s) | 6 (64 frames) | 1 (1 frame) |
+| biggest event (~25 s) | TTC dips to ~2 s | ~9 s |
+
+The plot shows the box *widths* from the two runs almost coincide, so detection and tracking are not what differ.
+
+**Isolating the cause (offline, no re-detection):** feeding the *same* stride-1 lead measurements to `TTCKalman` but only every 3rd one gave 4 events / 8 frames, versus 6 events / 64 frames on every measurement (by duration ~21 frames expected). So the Kalman filter alone loses most of the response: its noise parameters (`q_rate=50`, `R=25`) were tuned at ~30 fps and don't carry over to ~0.1 s between measurements. Raising `q_rate` to 200 recovers about the right duration (21 frames) but splits it into 9 events (noisier), and larger values get noisier still.
+
+**Hypothesis and experiment:** the filter's process noise is `diag(q_width*dt, q_rate*dt)`, which does not scale correctly with the time step (it ignores the coupling between rate uncertainty and width uncertainty). The textbook form for a constant-velocity model with continuous white noise on the rate is `Q = q * [[dt^3/3, dt^2/2],[dt^2/2, dt]]`, which should make the filter respond to the same real-time changes at any frame rate. Tested offline on the stride-1 lead data (`R=25`): with `q >= 1000` the every-3rd run has ~1/3 as many event frames as the every-frame run (145 vs 45 at q=1000; 156 vs 47 at q=3000), i.e. rate-consistent, and a median TTC difference on shared frames of 0.65-0.95 s. **Catch:** at those `q` values the filter is noisier overall (17-29 events on the every-frame data vs 6 with the current filter), so the absolute noise level still needs tuning, and there is no ground truth yet to tune against.
+
+**Not changed yet.** The current filter is still in `lead_ttc.py`. Options: (A) retune `q_rate`/`R` for ~10 fps (simple, but ties the tuning to a frame rate); (B) adopt the rate-independent `Q` and tune `q`/`R` once against ground truth; (C) raise the processing rate (smaller `imgsz`, ONNX/OpenVINO), which shrinks the problem but does not remove it. Leaning (B). **Lesson:** a filter validated by eye at one frame rate says nothing about another; a fixed-frame-rate assumption can hide inside "process noise" constants.
+
+**Other things noticed, not yet investigated:**
+- At `imgsz 640` on the 4K clip the lead was several track IDs at stride 1 ({5: 542, 68: 21, 92: 6, 99: 165}), versus 100% ID 4 at `imgsz 1280`. Either the tracker re-IDs the same car more at lower resolution, or lead selection degrades. Each ID change resets the Kalman filter.
+- `LeadSelector`'s `SWITCH_STREAK`/`LOST_STREAK` are counted in *processed frames*, so at stride 3 they mean 3x more real time (1 s to switch, 0.5 s before giving up). Should probably be defined in seconds.
+
+**Not verified on the real phone:** `--save-raw`, `--width/--height` (tested only with a fake camera in WSL).
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->
