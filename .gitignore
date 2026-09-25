@@ -4,3 +4,4 @@ outputs/
 *.pt
 __pycache__/
 scan_*.jpg
+probe_*.jpg
