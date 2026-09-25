@@ -420,4 +420,23 @@ Both pushed the KITTI/BDD100K evaluation + accident-anticipation stretch work ba
 
 ---
 
+## 2026-09-25 (cont.) — Week 3: decoupled live loop measured on the real phone
+
+**Result** (Iriun, `--source 1`, 640x480, `imgsz 640`, Windows laptop CPU, phone filming a video of cars on a screen; 675 processed frames, ~66 s):
+
+| | value |
+|---|---|
+| Display rate | **28 fps** (1847 of 1888 camera frames shown, 98%) |
+| Model rate | 10.3 fps (YOLO + tracker median 94 ms/frame) |
+| Frame age when processing starts | median 18 ms, max 44 ms |
+| Camera frames processed by the model | 675 of 1888 (36%) |
+
+Subjective: lag feels better than the version where display waited for YOLO (before: display ~10 fps). It is still not identical to `webcam_check.py` (no YOLO); the remaining difference is the overlay trailing by about one YOLO call, plus whatever the phone/Iriun/USB path adds, which we have not measured. A stopwatch-on-screen test would give the true end-to-end number if it ever matters.
+
+**Confirms the diagnosis:** the delay was our display being tied to inference, not the camera path.
+
+**Week 3 status:** the full chain (phone -> YOLO tracking -> lead selection -> Kalman TTC -> overlay) runs live at ~10 fps model / ~28 fps display. Still to do to finish the milestone: a test on real road footage from the windshield (the screen-video test proves the plumbing, not the lead selection or the TTC values), and choosing the capture size (720p/1080p vs 640x480) and `imgsz` with that footage.
+
+---
+
 <!-- Add new dated entries above this line as the project progresses. -->
