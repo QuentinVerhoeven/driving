@@ -114,28 +114,39 @@ class LeadSelector:
 
 
 class TTCKalman:
-    """Kalman filter on box width. State x = [width (px), rate dw/dt (px/s)]. TTC = width / rate."""
+    """Kalman filter on box width. State x = [width, rate dw/dt]. TTC = width / rate.
 
-    def __init__(self, q_width=1.0, q_rate=50.0, r_meas=25.0):
-        self.q_width = q_width
-        self.q_rate = q_rate
-        self.R = r_meas
-        self.x = None          # None until the first measurement arrives
+    Two design choices so the behaviour does not depend on the camera setup (see NOTES.md):
+    - Width is filtered in units of FRAME WIDTH, not pixels, so the noise constants mean the same thing at 640 px,
+      1080p or 4K. TTC is a ratio, so it is unaffected; the returned width/rate are converted back to pixels.
+    - Process noise Q is the textbook continuous-white-noise form q * [[dt^3/3, dt^2/2], [dt^2/2, dt]], so the filter
+      responds to the same real-time changes whatever the time between measurements (30 fps or ~10 fps).
+      (The original diag(q*dt) form was tuned at 30 fps and lost most closing events at ~10 fps.)
+    q and r_meas were tuned so it agrees with the original filter at every frame and stays consistent when only every
+    3rd measurement is used. They are NOT tuned against ground truth yet.
+    """
+
+    def __init__(self, frame_w, q=5e-5, r_meas=2e-5):
+        self.frame_w = float(frame_w)
+        self.q = q            # how fast the rate may change unexplained (relative-width units)
+        self.R = r_meas       # variance of one width measurement (relative-width units): sigma ~ 0.0045 of the frame width
+        self.x = None         # None until the first measurement arrives
         self.P = None
         self.last_t = None
-        self.last_id = None    # which track the state belongs to
+        self.last_id = None   # which track the state belongs to
 
     def update(self, width, t, track_id):
-        """Fold in one width measurement taken at time t (s) for car `track_id`. Returns (width_est, rate_est, ttc)."""
+        """Fold in one width measurement (pixels) taken at time t (s) for car `track_id`. Returns (width_px, rate_px_per_s, ttc)."""
+        w = width / self.frame_w
         if self.x is None or track_id != self.last_id:
-            # first measurement, or the lead is a DIFFERENT car: the old [width, rate] describes
-            # another vehicle, and folding the new width in would look like a huge fake closing speed
+            # first measurement, or the lead is a DIFFERENT car: the old [width, rate] describes another vehicle,
+            # and folding the new width in would look like a huge fake closing speed
             self.last_id = track_id
-            # first measurement: trust the width, know nothing about the rate, be unsure
-            self.x = np.array([width, 0.0])
-            self.P = np.eye(2) * 100.0
+            self.x = np.array([w, 0.0])                 # trust the width, know nothing about the rate
+            sigma0 = 10 / 3840                          # ~10 px on a 4K frame, as a fraction of frame width
+            self.P = np.eye(2) * sigma0 ** 2
             self.last_t = t
-            return self.x[0], self.x[1], np.nan
+            return self.x[0] * self.frame_w, 0.0, np.nan
 
         dt = t - self.last_t
         if dt <= 0:
@@ -143,14 +154,14 @@ class TTCKalman:
         self.last_t = t
 
         F = np.array([[1.0, dt], [0.0, 1.0]])
-        Q = np.array([[self.q_width * dt, 0.0], [0.0, self.q_rate * dt]])  # bigger gap -> trust prediction less
+        Q = self.q * np.array([[dt ** 3 / 3, dt ** 2 / 2], [dt ** 2 / 2, dt]])   # bigger gap -> trust prediction less
 
         # predict
         self.x = F @ self.x
         self.P = F @ self.P @ F.T + Q
 
         # update (H = [1, 0]: we only measure width)
-        y = width - self.x[0]
+        y = w - self.x[0]
         S = self.P[0, 0] + self.R
         K = self.P[:, 0] / S
         self.x = self.x + K * y
@@ -158,4 +169,4 @@ class TTCKalman:
 
         w_est, rate = self.x
         ttc = w_est / rate if rate > 0 else np.nan   # only meaningful while the box is growing
-        return w_est, rate, ttc
+        return w_est * self.frame_w, rate * self.frame_w, ttc
