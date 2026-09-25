@@ -6,7 +6,7 @@
     calls instead of looking at the whole clip at once.
 
     Usage (per frame):
-        lead = selector.update(boxes)          # boxes: list of (track_id, x1, y1, x2, y2)
+        lead = selector.update(boxes, t)       # boxes: list of Box, t: frame time in seconds
         if lead is not None:
             w_est, rate, ttc = kalman.update(lead.w, t, lead.track_id)
 """
@@ -16,11 +16,16 @@ from dataclasses import dataclass
 import numpy as np
 
 # --- lead-selection settings (values tuned on clip1_30s, see NOTES.md) ---
-BAND_HALF_WIDTH = 0.10   # "in my lane" = box center within +-10% of frame width from center
+BAND_HALF_WIDTH = 0.10   # "in my lane" = box center within +-10% of frame width from the (adjustable) center
 MAX_ASPECT_RATIO = 2.5   # w/h above this = self-detection of our own hood, not a car
 BOTTOM_MARGIN = 0.95     # boxes whose bottom edge is in the bottom 5% of the frame = our hood
-SWITCH_STREAK = 10       # frames a challenger must be the biggest candidate before we switch
-LOST_STREAK = 5          # frames the current lead must be absent before we give up on it
+# Streaks are in SECONDS (and at least MIN_FRAMES frames), not frames: the live loop only sees ~10 frames/s, so a
+# frame count would mean 3x more real time than the 30 fps clips these were tuned on (10 frames = 9 gaps = 0.30 s,
+# 5 frames = 4 gaps = 0.13 s at 30 fps). LOST_TIME was then raised to 0.30 s: at ~10 fps the direct conversion (0.13 s)
+# picked a wrong car once on a clip where the lead never changes; 0.30 s gave 100% at both rates (see NOTES.md).
+SWITCH_TIME = 0.30       # s a challenger must stay the biggest candidate before we switch to it
+LOST_TIME = 0.30         # s the current lead must be absent before we give up on it
+MIN_FRAMES = 2           # ...but never on a single frame, however slow the frame rate
 
 
 @dataclass
@@ -49,21 +54,32 @@ class Box:
 
 
 class LeadSelector:
-    def __init__(self, frame_w, frame_h):
+    def __init__(self, frame_w, frame_h, band_half=BAND_HALF_WIDTH, center_offset=0.0):
         self.frame_w = frame_w
         self.frame_h = frame_h
-        # state that persists between frames (this is what the notebook loop kept in variables)
+        # Lane band settings, adjustable at run time because a phone on a windshield is never perfectly centered:
+        # the band is centered at (0.5 + center_offset) of the frame width and extends +-band_half either side.
+        self.band_half = band_half
+        self.center_offset = center_offset
+        # state that persists between frames
         self.current_lead = None       # track_id of the car we currently call "the lead"
         self.challenger_id = None      # a different car that is currently the biggest candidate
-        self.challenger_streak = 0     # for how many frames in a row it has been
-        self.missing_streak = 0        # for how many frames the current lead has been absent
+        self.challenger_since = None   # time it first became the biggest candidate
+        self.challenger_n = 0          # number of frames it has been
+        self.missing_since = None      # time the current lead was first not seen
+        self.missing_n = 0             # number of frames it has been absent
+
+    def band(self):
+        """Left and right edge of the lane band as fractions of the frame width."""
+        center = 0.5 + self.center_offset
+        return center - self.band_half, center + self.band_half
 
     def _candidates(self, boxes):
         """Stateless filter: boxes in our lane band that are not our own hood."""
-        center = self.frame_w / 2
+        lo, hi = self.band()
         out = []
         for b in boxes:
-            in_lane = abs(b.cx - center) < BAND_HALF_WIDTH * self.frame_w
+            in_lane = lo * self.frame_w < b.cx < hi * self.frame_w
             not_self = b.w / b.h < MAX_ASPECT_RATIO and b.y2 < BOTTOM_MARGIN * self.frame_h
             if in_lane and not_self:
                 out.append(b)
@@ -71,15 +87,20 @@ class LeadSelector:
 
     def _switch_to(self, box):
         self.current_lead = box.track_id
-        self.missing_streak = 0
-        self.challenger_id, self.challenger_streak = None, 0
+        self.missing_since, self.missing_n = None, 0
+        self.challenger_id, self.challenger_since, self.challenger_n = None, None, 0
         return box
 
-    def update(self, boxes):
-        """Feed one frame's tracked boxes. Returns the lead Box, or None if there is no pick this frame."""
+    def _lead_missing(self, t):
+        if self.missing_since is None:
+            self.missing_since = t
+        self.missing_n += 1
+
+    def update(self, boxes, t):
+        """Feed one frame's tracked boxes and its timestamp t (s). Returns the lead Box, or None if there is no pick."""
         cands = self._candidates(boxes)
         if not cands:
-            self.missing_streak += 1
+            self._lead_missing(t)
             return None
 
         top = max(cands, key=lambda b: b.area)
@@ -90,25 +111,25 @@ class LeadSelector:
         lead = next((b for b in cands if b.track_id == self.current_lead), None)
 
         if lead is None:
-            # current lead not seen this frame; give up only after LOST_STREAK frames in a row
-            self.missing_streak += 1
-            if self.missing_streak >= LOST_STREAK:
+            # current lead not seen this frame; give up only after it has been gone long enough
+            self._lead_missing(t)
+            if self.missing_n >= MIN_FRAMES and t - self.missing_since >= LOST_TIME:
                 return self._switch_to(top)
             return None
 
-        self.missing_streak = 0
+        self.missing_since, self.missing_n = None, 0
 
         if top.track_id == self.current_lead:
-            self.challenger_id, self.challenger_streak = None, 0
+            self.challenger_id, self.challenger_since, self.challenger_n = None, None, 0
             return lead
 
-        # a different car is biggest: count how long it has been
+        # a different car is biggest: measure how long it has been
         if top.track_id == self.challenger_id:
-            self.challenger_streak += 1
+            self.challenger_n += 1
         else:
-            self.challenger_id, self.challenger_streak = top.track_id, 1
+            self.challenger_id, self.challenger_since, self.challenger_n = top.track_id, t, 1
 
-        if self.challenger_streak >= SWITCH_STREAK:
+        if self.challenger_n >= MIN_FRAMES and t - self.challenger_since >= SWITCH_TIME:
             return self._switch_to(top)
         return lead
 
