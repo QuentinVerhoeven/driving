@@ -21,6 +21,8 @@ from pathlib import Path
 import cv2
 from ultralytics import YOLO
 
+from lead_ttc import BAND_HALF_WIDTH, Box, LeadSelector
+
 # COCO class IDs we care about (same as track.py)
 VEHICLE_CLASSES = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
 
@@ -32,6 +34,26 @@ def open_source(source):
         backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
         return cv2.VideoCapture(int(source), backend)
     return cv2.VideoCapture(source)
+
+
+def to_boxes(r):
+    """Turn Ultralytics' tensors for one frame into a list of our Box objects."""
+    if r.boxes.id is None:  # nothing tracked in this frame
+        return []
+    ids = r.boxes.id.int().tolist()
+    xyxy = r.boxes.xyxy.tolist()
+    return [Box(tid, *corners) for tid, corners in zip(ids, xyxy)]
+
+
+def draw_lead(img, lead, frame_w):
+    """Lane band (thin white lines) + the chosen lead car (thick green box)."""
+    h = img.shape[0]
+    for x in (frame_w / 2 - BAND_HALF_WIDTH * frame_w, frame_w / 2 + BAND_HALF_WIDTH * frame_w):
+        cv2.line(img, (int(x), 0), (int(x), h), (255, 255, 255), 2)
+    if lead is not None:
+        cv2.rectangle(img, (int(lead.x1), int(lead.y1)), (int(lead.x2), int(lead.y2)), (0, 255, 0), 8)
+        cv2.putText(img, f"LEAD id {lead.track_id}", (int(lead.x1), max(int(lead.y1) - 15, 40)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 5)
 
 
 def main():
@@ -60,6 +82,8 @@ def main():
         writer = cv2.VideoWriter(str(args.out), cv2.VideoWriter_fourcc(*"mp4v"), src_fps, (width, height))
 
     model = YOLO(args.model)
+    selector = LeadSelector(width, height)  # created ONCE, outside the loop: its memory must survive across frames
+    lead_counts = {}                        # how many frames each track id was the lead
 
     loop_times = deque(maxlen=30)   # timestamps of the last 30 loop iterations -> smoothed FPS
     yolo_ms = []                    # how long each YOLO call took, to see if the model is the bottleneck
@@ -84,7 +108,12 @@ def main():
         )[0]  # track() returns a list with one Results per input image
         yolo_ms.append((time.time() - t0) * 1000)
 
+        lead = selector.update(to_boxes(r))
+        if lead is not None:
+            lead_counts[lead.track_id] = lead_counts.get(lead.track_id, 0) + 1
+
         annotated = r.plot()  # frame with boxes + IDs drawn
+        draw_lead(annotated, lead, width)
 
         loop_times.append(time.time())
         if len(loop_times) > 1:
@@ -113,6 +142,7 @@ def main():
     if frame_idx:
         print(f"\n{frame_idx} frames in {elapsed:.1f}s = {frame_idx / elapsed:.1f} fps end to end")
         print(f"YOLO + tracker: {sum(yolo_ms) / len(yolo_ms):.0f} ms/frame on average")
+        print(f"Lead picks (track id -> frames): {lead_counts}")
 
 
 if __name__ == "__main__":
