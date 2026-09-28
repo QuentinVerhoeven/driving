@@ -75,13 +75,27 @@ class LeadSelector:
         return center - self.band_half, center + self.band_half
 
     def _candidates(self, boxes):
-        """Stateless filter: boxes in our lane band that are not our own hood."""
+        """Boxes in our lane band that are not our own hood.
+
+        The self-detection check (aspect ratio, bottom margin) is skipped for whichever box is
+        ALREADY our established lead: a real lead car closing to near-collision range ends up filling
+        the bottom of the frame almost identically to our own hood (occupies most of the frame width,
+        bottom edge near the frame edge), so applying the same check to it would reject the real lead
+        at exactly the range TTC matters most (see NOTES.md, 2026-09-28). New candidates still get the
+        full check, so a stray hood-like box can never be picked as a fresh lead in the first place --
+        only a car already confirmed as the lead is grandfathered in as it grows.
+        """
         lo, hi = self.band()
         out = []
         for b in boxes:
             in_lane = lo * self.frame_w < b.cx < hi * self.frame_w
+            if not in_lane:
+                continue
+            if b.track_id == self.current_lead:
+                out.append(b)
+                continue
             not_self = b.w / b.h < MAX_ASPECT_RATIO and b.y2 < BOTTOM_MARGIN * self.frame_h
-            if in_lane and not_self:
+            if not_self:
                 out.append(b)
         return out
 
@@ -156,8 +170,16 @@ class TTCKalman:
         self.last_t = None
         self.last_id = None   # which track the state belongs to
 
-    def update(self, width, t, track_id):
-        """Fold in one width measurement (pixels) taken at time t (s) for car `track_id`. Returns (width_px, rate_px_per_s, ttc)."""
+    def update(self, width, t, track_id, truncated=False):
+        """Fold in one width measurement (pixels) taken at time t (s) for car `track_id`.
+
+        `truncated=True` means the box is clipped by the frame edge (car exiting frame): its width no
+        longer reflects the car's true extent and can even shrink while the car keeps closing (see
+        NOTES.md, 2026-09-28). We still predict forward so the estimate keeps moving, but skip folding
+        in that measurement -- coasting on the last trusted rate is better than trusting a lying one.
+
+        Returns (width_px, rate_px_per_s, ttc).
+        """
         w = width / self.frame_w
         if self.x is None or track_id != self.last_id:
             # first measurement, or the lead is a DIFFERENT car: the old [width, rate] describes another vehicle,
@@ -181,13 +203,59 @@ class TTCKalman:
         self.x = F @ self.x
         self.P = F @ self.P @ F.T + Q
 
-        # update (H = [1, 0]: we only measure width)
-        y = w - self.x[0]
-        S = self.P[0, 0] + self.R
-        K = self.P[:, 0] / S
-        self.x = self.x + K * y
-        self.P = self.P - np.outer(K, self.P[0, :])   # (I - K H) P with H = [1, 0]
+        if not truncated:
+            # update (H = [1, 0]: we only measure width)
+            y = w - self.x[0]
+            S = self.P[0, 0] + self.R
+            K = self.P[:, 0] / S
+            self.x = self.x + K * y
+            self.P = self.P - np.outer(K, self.P[0, :])   # (I - K H) P with H = [1, 0]
+        # else: predicted state stands uncorrected; P keeps growing via Q, so the filter is honestly
+        # less certain for as long as the box stays truncated.
 
         w_est, rate = self.x
         ttc = w_est / rate if rate > 0 else np.nan   # only meaningful while the box is growing
         return w_est * self.frame_w, rate * self.frame_w, ttc
+
+
+EDGE_MARGIN_PX = 2.0     # box within this many px of x=0 or x=frame_w counts as truncated (see TTCKalman.update)
+STALE_AFTER_S = 1.0      # drop a vehicle's filter if it hasn't been seen for this long
+
+
+class NearbyVehicleTTC:
+    """TTC for EVERY tracked vehicle, not just the selected lead -- situational awareness, not a second
+    lead-selector. Same box-width-expansion method as TTCKalman, just one filter per track id instead of
+    one singleton, and each gets the same edge-truncation handling (see NOTES.md, 2026-09-28).
+
+    Deliberately does NOT try to figure out which of these vehicles might cut in, merge, or cross our
+    path -- that's real trajectory/intent prediction, out of scope (see CLAUDE.md, "Scope"). This only
+    answers "how is each currently-visible vehicle's box growing," the same question TTCKalman already
+    answers for the lead, applied to everything else in view too.
+    """
+
+    def __init__(self, frame_w):
+        self.frame_w = frame_w
+        self.filters = {}      # track_id -> TTCKalman
+        self.last_seen = {}    # track_id -> t
+
+    def update(self, boxes, t):
+        """Feed one frame's tracked boxes (list of Box) and its timestamp t (s).
+
+        Returns {track_id: (width_px, rate_px_per_s, ttc)} for every box this frame.
+        """
+        results = {}
+        for b in boxes:
+            if b.track_id not in self.filters:
+                self.filters[b.track_id] = TTCKalman(self.frame_w)
+            truncated = b.x1 <= EDGE_MARGIN_PX or b.x2 >= self.frame_w - EDGE_MARGIN_PX
+            results[b.track_id] = self.filters[b.track_id].update(b.w, t, b.track_id, truncated=truncated)
+            self.last_seen[b.track_id] = t
+
+        # Drop filters for vehicles not seen in a while, so memory doesn't grow unbounded over a long
+        # clip -- every track this pipeline has ever seen would otherwise be kept forever.
+        stale_ids = [tid for tid, last_t in self.last_seen.items() if t - last_t > STALE_AFTER_S]
+        for tid in stale_ids:
+            del self.filters[tid]
+            del self.last_seen[tid]
+
+        return results
