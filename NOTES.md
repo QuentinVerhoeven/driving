@@ -230,6 +230,8 @@ Both pushed the KITTI/BDD100K evaluation + accident-anticipation stretch work ba
 
 ---
 
+**Note added 2026-09-28:** everything from here through "Readiness pass for a real drive" (below) is the Week 3 live-capture narrative. It's kept as a record of finished, frozen work -- see the 2026-09-28 entry at the bottom of this file for why live capture was dropped from scope. Nothing in this stretch is a guide to future changes.
+
 ## 2026-09-24 (cont.) — Week 3 setup: native Windows environment, and the phone is the live camera
 
 **Native Windows setup (WSL can't reach a webcam).** Nothing was installed on the Windows side, so: `uv` via the official PowerShell installer (lets uv manage Python 3.12 itself, same as in WSL), git via `winget install --id Git.Git`, then a fresh `git clone` of the GitHub repo into a normal Windows folder + `uv sync`. Chose a separate clone synced through git over running from `\\wsl$\...` paths: the WSL copy stays the main dev environment, the Windows copy exists only to run live capture. The `pytorch-cpu` index in `pyproject.toml` is cross-platform, so no config changes were needed. Problem hit: after `winget install`, `git` was still "not recognized" in new PowerShell windows (Windows shells can inherit a stale PATH from their parent process); fixed by verifying the install path and restarting so the PATH refreshed.
@@ -542,6 +544,450 @@ Chose 0.30 s. **Limit:** this clip has one lead the whole time, so it shows the 
 4. **Parked test:** `uv run python live.py --source 1 --show --save-raw outputs/parked`. Check the picture is upright (else add `--rotate`), align the two white lane lines with your lane using a/d/w/s, and check display ~28 fps / model ~10 fps.
 5. Drive: a **passenger** runs `uv run python live.py --source 1 --show --save-raw outputs/drive1 --lane-offset X --band Y` (X and Y from step 4). End with `q` (not by closing the laptop).
 6. Afterwards confirm `outputs/drive1.mp4`, `outputs/drive1_times.csv` and `outputs/drive1_live_log.csv` exist; then replay with `--source outputs/drive1.mp4 --times outputs/drive1_times.csv --stride 3`.
+
+---
+
+## 2026-09-28 — Scope change: dropping live capture, recorded video only
+
+**Why.** Not enough time left to get to the point of actually validating live
+capture in a real car (the parked test and real drive from the previous
+entry's checklist). Recorded dashcam video only, from here on.
+
+**What changes:**
+- **Deliverables** (`CLAUDE.md`): the "live demo video" deliverable is
+  replaced by an **annotated recorded video** -- boxes, TTC, and event
+  overlays produced offline by the existing pipeline on a real drive
+  recording. The quantitative-evaluation deliverable is unchanged.
+- **Roadmap** (`CLAUDE.md`): the Week 3 "first live version" milestone is
+  dropped and weeks 4 through 10+ pull forward one slot: GPS/accelerometer
+  logging is now Week 3, speeding Week 4, potholes Week 5, KITTI/BDD100K +
+  accident-anticipation Weeks 6-8, final polish Week 9+ (reworded from "final
+  live demo" to "annotated demo video polish").
+- **Live-only code is kept, frozen, not deleted or moved:** `live.py`'s
+  camera mode, `camera_scan.py`, `camera_probe.py`, `webcam_check.py`. No
+  more real-phone testing, no more live perf tuning. They stay in the repo as
+  a record of a real week of work (debugging Iriun/camera indices, the
+  latest-frame-grabber + inference-worker split, the frame-rate-dependence
+  finding below).
+
+**What doesn't change:** `lead_ttc.py`'s actual logic (`LeadSelector`,
+`TTCKalman`) needed no edits for this -- it already takes one frame + a
+timestamp at a time and has no camera/threading code in it (only its
+docstring language talks about "streaming"/"live," left as-is since the file
+isn't being touched). It stays in active use for recorded video: `live.py`'s
+file-replay mode, `--stride` to simulate different effective frame rates, and
+any future recorded footage (KITTI is 10 fps, close to what the live rate
+would have been). The frame-rate- and resolution-independent Kalman redesign
+from Week 3 (see the "Kalman filter redesigned" entry above) is exactly what
+makes that replay-at-any-stride use case work, so that work wasn't wasted --
+it just serves recorded video instead of a live camera.
+
+**Next:** the KITTI ground-truth TTC check already agreed on (compare our TTC
+against LiDAR-derived ground-truth TTC on KITTI tracking sequences, decide
+whether TTC is usable before leaning further on it in Week 3's events) is
+unaffected by this change and is still the next concrete step, once the KITTI
+tracking labels/oxts/calib/images are downloaded into `data/kitti`.
+
+---
+
+## 2026-09-28 (cont.) — Ground-truth TTC math from KITTI labels (`kitti_gt_ttc.py`), written ahead of the data download
+
+**Why now.** The KITTI image zip is ~15 GB and takes a while to download, but
+the label/oxts/calib files are tiny and the label format is fixed and
+documented, so the ground-truth TTC computation could be written and tested
+against a synthetic fixture before the real files arrive.
+
+**A correction to the plan from the previous conversation:** I'd said closing
+speed would need "correcting for ego motion using the OXTS speed." That's
+wrong, and worth recording so I don't repeat it. KITTI's tracking labels give
+each object's `x, y, z` location in the **camera's own coordinate frame**,
+and that frame moves with the car every frame. So `z` (depth) at a given
+frame is already the object's distance *relative to the moving ego vehicle*
+-- ego motion is already baked into the coordinate frame. `dz/dt` directly
+gives the closing rate; adding an OXTS correction on top would double-count
+ego motion. OXTS is still parsed (`parse_oxts_file`), for a later sanity check
+(does implied ego speed roughly match `vf`?) and for calibration work, just
+not for this.
+
+**Ground-truth TTC**, per tracked object, at each frame with a next frame for
+the same track: `closing_speed = -dz/dt` (KITTI tracking is 10 Hz, so
+`dt = 0.1 s` per frame step, more if a frame was skipped); `gt_ttc = z /
+closing_speed` when `closing_speed > 0` (closing), else undefined.
+
+**Verified:** a synthetic fixture (one fake track, `z` decreasing by exactly
+1.0 m every frame -> known closing speed of 10 m/s) round-tripped through the
+real parser and `compute_gt_ttc`, matching the hand-computed TTC (`z / 10`)
+to floating-point precision at every frame except the track's last (correctly
+undefined, since there's no next frame to difference against). Following the
+lesson from the earlier Kalman self-test bug: the test prints how many values
+it actually compared (4), not just that it passed, so a vacuous all-NaN
+result would be caught.
+
+**Not yet done:** this only computes ground truth from labels. Comparing it
+against our detector's TTC needs the actual image frames, still downloading.
+Next step once the images land: run the real pipeline (YOLO -> lead
+selection -> `TTCKalman`) on the same sequences and diff against
+`compute_gt_ttc`'s output.
+
+---
+
+## 2026-09-28 (cont.) — Real KITTI labels/oxts/calib extracted, ground-truth TTC verified on real data
+
+`data_tracking_label_2.zip`, `data_tracking_oxts.zip`, and `data_tracking_calib.zip`
+downloaded and extracted into `data/kitti/training/{label_02,oxts,calib}`
+(`testing/` also extracted but has no labels, so unused). The 15 GB image zip
+(`data_tracking_image_2.zip`) is still downloading separately.
+
+**Ran `kitti_gt_ttc.py` against real sequence 0000** (not just the synthetic
+fixture from the previous entry): 1,089 label rows, 711 after dropping
+`DontCare` rows (`track_id == -1`, KITTI's placeholder for unlabeled/ignored
+regions) -- split Van 292, Car 243, Cyclist 154, Pedestrian 22. Of those, 456
+rows got a defined ground-truth TTC (i.e. were actually closing at that
+frame). Only `Car`/`Van` will matter for comparing against our vehicle-only
+detector -- `Cyclist`/`Pedestrian` rows should be filtered out at the same
+time as `DontCare`, once we get to the real comparison.
+
+**A sanity check that came for free:** this sequence's ego vehicle is
+essentially stationary (`oxts`'s `vf`, forward speed, ranges -0.03 to
+0.20 m/s across the whole sequence), and the ground-truth closing speeds
+computed purely from the labels' `z` are correspondingly tiny (~0.4-0.8 m/s).
+These two numbers come from independent sources (3D box labels vs. GPS/IMU)
+and were never combined in the computation, so their agreement is a real,
+if small, check that the "no OXTS correction needed" reasoning from the
+previous entry holds on actual data, not just the synthetic fixture.
+
+**Still blocked on:** the image zip, for running our detector and doing the
+actual ours-vs-ground-truth comparison.
+
+---
+
+## 2026-09-28 (cont.) — `TTCKalman` on perfect (labeled) boxes vs. ground truth, and a real failure mode found (`kitti_label_ttc_check.py`)
+
+**Why this check, done before the image zip finished.** KITTI's label files
+have the 2D box (`bbox_left/top/right/bottom`) as well as the 3D location.
+That means our real `TTCKalman` can be fed the *labeled* box width -- no
+YOLO, no tracker, zero detection noise -- and compared against the exact
+ground truth from the previous entry. This isolates "is box-width TTC sound
+in principle" from "how good is our detector," before the detector is even
+in the picture.
+
+Picked KITTI sequence `0019`, track 42 (found by scanning all label files for
+the longest run of consecutive frames with a defined ground-truth TTC, no
+image files needed for that scan): 237 frames, real distance closing from
+52.6 m down to 1.1 m -- an actual near-collision, not just a mild approach.
+Frame width assumed 1242 px (KITTI's usual resolution; the calib file's
+principal point, ~609.6 px, is consistent with that but not yet confirmed
+against a real image -- still downloading).
+
+**Headline numbers:** median |error| 1.95 s; TTC-under-8s event
+precision 0.91, recall 0.92, on this one track. Encouraging, but see the two
+caveats below before trusting them -- both matter more than the numbers.
+
+**Finding 1 (serious): box-width TTC breaks down exactly at the most
+dangerous moment, when the box is truncated by the frame edge.** Around
+frame 411 the label's `truncated` flag flips to 1 -- the car is exiting the
+image, so its *labeled* 2D box gets clipped at the frame boundary instead of
+shrinking/growing with the car's true extent. The box keeps growing for a
+few more frames (residual real growth plus clipping happening to align), but
+by frame 420 it starts *shrinking* even though the real distance (`z`) is
+still closing smoothly all the way down to 1.1 m. Our filter's estimated
+growth rate follows the shrinking box: it falls through zero and goes
+negative right as ground-truth TTC is at its lowest (0.4-1.5 s, i.e. the
+scariest part of the whole clip), so `TTCKalman` reports TTC *increasing*
+(20 s, 61 s, then undefined) at exactly the moment it should be screaming.
+This is not a filter-tuning problem -- the input signal itself (labeled box
+width) stops meaning what the method assumes it means, once truncation
+kicks in. **This directly matters for the project's core method:** a lead
+car very close and slightly exiting frame (tight tailgating, a cut-in) is
+exactly the scenario TTC exists to catch. Open question for the real
+(detector-driven) evaluation: does YOLO's own box behave the same way when
+truncated, or does it fail differently (e.g. losing the detection entirely,
+which `LeadSelector`'s missing-lead handling would catch)?
+
+**Finding 2 (a measurement-methodology note): the "exact" ground truth
+itself is a jagged, staircase signal, not smooth.** Checked directly:
+`closing_speed_mps` is exactly constant for runs of 2 to 10 consecutive
+frames before stepping to a new value (30 runs of length 1, but also 20 runs
+of length 5, two of length 10). That means KITTI's 3D position labels are
+themselves piecewise-linear between coarser annotated keyframes, not a true
+per-frame-independent measurement -- so a naive one-frame backward
+difference (`dz` over one frame) faithfully recovers that piecewise-constant
+rate rather than introducing noise of its own, but the resulting ground
+truth still has real discontinuities at each keyframe boundary. Both this
+ground truth and our estimate are a *ratio* (`distance / closing_speed`), so
+both blow up toward infinity whenever the closing speed drifts toward zero
+(visible in the plot as both lines spiking past 30 s around frames 300-345)
+-- this is inherent to defining TTC as a ratio, not specific to our filter.
+**Consequence for the eventual full evaluation:** the median-error and
+precision/recall numbers above are dominated by real disagreement in the
+middle of the range and by these ratio blow-ups at the edges in roughly
+equal measure; a fairer metric would either restrict comparison to frames
+where both TTCs are below some cap (e.g. 30 s) or use a smoothed/windowed
+ground-truth derivative instead of a single-frame one. Not yet done -- flagged
+for when the full detector-driven comparison is built.
+
+**Not yet done:** running this against our actual detector's boxes (needs the
+image zip); deciding whether truncated frames should be excluded from the
+aggregate metric or reported separately, since they represent a real,
+different failure mode rather than ordinary noise.
+
+---
+
+## 2026-09-28 (cont.) — Truncation-aware `TTCKalman`: mitigated, not solved
+
+**Fix.** `TTCKalman.update()` (`lead_ttc.py`) takes a new optional
+`truncated` flag (default `False`, so `live.py` and anything else already
+calling it is unaffected). When `True`, the filter still predicts forward
+(state advances, `P` grows via `Q` as usual) but skips folding in that
+frame's width measurement -- the same principle `LeadSelector` already uses
+for a missing lead: don't let one corrupted input poison the state, coast on
+the last trusted estimate instead.
+
+**Truncation has to be detected without KITTI's `truncated` label**, since a
+real YOLO detection won't have one -- so `kitti_label_ttc_check.py` flags a
+box as truncated when it's within 2 px of `x=0` or `x=frame_w`. Checked
+against KITTI's own label as a validation of that heuristic: agreement on
+95% of frames, 0 frames of real truncation missed, 11 frames flagged extra
+(the ones from the previous entry where the box already touches the edge
+but isn't corrupted yet -- flagging early is the safe direction to be
+wrong in).
+
+**Result on the same track (0019, track 42):** median |error| 1.82 s (was
+1.95 s); TTC<8s event precision 0.92, recall 1.00 (was 0.91 / 0.92 -- the
+missed event is now caught). More importantly, visually: the filter no
+longer reports TTC *increasing* to 20 s then 61 s during the truncated
+stretch -- it flattens out around 5-6 s and holds there instead of reversing
+sign.
+
+**Be precise about what this is and isn't.** This is a mitigation, not a
+fix for the underlying problem: during the truncated stretch the filter
+correctly stops lying, but it also does not track the ground truth's
+continued drop toward 0 s -- it just holds roughly steady while the real
+danger keeps increasing. That's not a shortcoming of the coasting logic;
+once the box is clipped, its width genuinely no longer carries information
+about how much closer the car has gotten, so there is nothing left in this
+signal to recover from. The honest conclusion: **box-width TTC has a real
+blind spot in exactly the closest-range, most-dangerous moments**, and the
+project's decision rule (see the scope-change entry above: lean on
+distance/headway if TTC is unusable at short range) is directly relevant
+here, not just a hypothetical. Worth deciding, once Week 3's distance/
+headway work exists, whether it should specifically take over from TTC once
+truncation is detected, rather than only running independently.
+
+---
+
+## 2026-09-28 (cont.) — The KITTI image zip landed; the real detector-driven comparison, and a second real failure mode
+
+**Setup.** Extracted just sequence `0019` (~800 MB) from the 15.8 GB zip
+rather than the whole thing (`unzip ... "training/image_02/0019/*"`), since
+that's the only sequence used so far. Confirmed real image size 1238x374
+(vs. the 1242 assumed earlier from the calib principal point -- close, now
+corrected in `kitti_label_ttc_check.py`, no effect on its numbers).
+
+**A real infrastructure problem first: `model.track(source=[...many paths...], stream=True)` OOM-killed this 7.4 GB machine.**
+Passing the full sequence (1059 paths) or even just a 260-frame slice as a
+list to `source` caused `python3` to be OOM-killed (confirmed in `dmesg`,
+~6.4-6.6 GB RSS at kill) -- and critically, the jump from ~290 MB to 6+ GB
+happened on the *first* result, before a single frame had visibly been
+processed, so it isn't a per-frame accumulation, something in Ultralytics
+allocates relative to the length of the list itself. Not worth chasing
+further: `kitti_track.py` now feeds frames one at a time
+(`model.track(single_frame_array, persist=True, ...)`), the exact pattern
+`live.py` already uses successfully. Confirmed fast and stable (0.7 fps
+first frame, ~11 fps once warmed up, 260 frames in 24 s).
+
+**Detection quality, on the frames it saw:** matched our detector's boxes
+back to KITTI's labeled track 42 by IoU (our tracker doesn't know KITTI's
+ID numbers). Mean IoU 0.71 where matched -- solid agreement on where the car
+actually is. But two real occlusions in this sequence (KITTI's own
+`occluded=2`, frames 298-308 and 341-380) broke detection entirely for those
+stretches, and each time the car reappeared, ByteTrack gave it a NEW track
+ID (2 -> 8 -> 15) -- the same occlusion-breaks-continuity problem already
+found and documented for `--conf` back in Week 1, now reproduced on
+real footage with ground truth to check against, not just noticed as an
+ID-flicker symptom.
+
+**Finding 3 (a second real failure mode, different from truncation): `LeadSelector`'s own self-detection filter throws out a legitimate lead car at the closest range.**
+After the second occlusion, track 15 (confirmed by IoU 0.7-0.85 to be the
+same real car) is detected fine by YOLO -- but `LeadSelector` never picks it
+as the lead, for the rest of the sequence. Checked why: its box's bottom
+edge (`y2 / frame_height`) reaches 0.99-1.00 as the car gets very close,
+past `BOTTOM_MARGIN = 0.95` -- the exact heuristic meant to filter out our
+own dashcam hood (which also sits glued to the bottom of the frame). A real
+car about to collide fills the bottom of the frame almost identically to a
+hood, so the filter can't tell them apart, and rejects the real lead.
+
+**Consequence, measured:** the full pipeline (`kitti_pipeline_compare.py`)
+produced **zero comparable TTC readings during the only stretch where
+ground-truth TTC actually drops below the 8 s event threshold** (down to
+0.4-1.5 s, frames ~410-430) -- the lead was gone (occlusion) or rejected
+(self-detection filter) for the entire danger window. Where a lead WAS
+correctly matched to the real car, median |error| was 6.12 s (worse than
+`kitti_label_ttc_check.py`'s 1.82 s on perfect boxes, as expected -- this
+number now includes real ID switches and missed frames) -- but that number
+undersells the real problem, since it's computed on exactly the frames
+where the system was working, not the frames where it mattered most.
+
+**This is the same underlying pattern as this morning's truncation finding,
+via a different heuristic:** two separate rules (`BOTTOM_MARGIN` for
+self-detection, box-width TTC's dependence on an unclipped box) were each
+tuned assuming ordinary footage, and both break in the same regime -- the
+closest range, right before a real collision -- because that's exactly
+where a real lead car starts looking like the artifacts those rules exist
+to reject (a hood, a clipped box). **Not yet fixed.** Candidate ideas for
+later: relax `BOTTOM_MARGIN` (or drop it) once a car has been tracked as
+the lead for a while, so it can't be "revealed" as self-detection just by
+getting closer; or use track continuity/size growth trend rather than a
+fixed frame-position threshold to distinguish hood from lead car.
+
+**Honest bottom line for the project's decision rule:** on this one real
+near-collision clip, the current pipeline would have given no TTC warning
+at all during the actual danger, for reasons upstream of the Kalman filter
+itself (detection/tracking continuity and lead selection, not TTC math).
+This matters more than the label-only numbers from this morning and should
+be the headline result if this clip goes in the README, not the median-error
+figure alone.
+
+---
+
+## 2026-09-28 (cont.) — Correction: "Finding 3" above was misdiagnosed
+
+**What was wrong.** The previous entry's "Finding 3" claimed
+`LeadSelector`'s `BOTTOM_MARGIN` self-detection filter was rejecting track
+15 as a false hood-detection. Before implementing a fix, I checked WHERE
+track 15's box actually is relative to the lane band, and it doesn't hold
+up: track 15 first appears at frame 381 with box-center `cx = 414`, and the
+lane band for this 1238 px frame is `[495, 743]` -- already outside the band
+at first appearance, and `cx` moves further left afterward, never entering
+the band. `BOTTOM_MARGIN` is never even reached; `in_lane` fails first.
+I'd jumped to the self-detection filter because `bottom_frac` crossing 0.95
+around frame 402 lined up suspiciously well with when the pipeline lost the
+car -- but the car was already excluded 20 frames earlier, for a different
+reason, so that correlation was coincidental.
+
+**The deeper problem: this was the wrong test case entirely.** Checked GT
+track 42's 3D pose: `rotation_y` sits at ~1.6 rad (~90 deg) for its whole
+life, and its lateral offset (`x`) is only 1-5 m. In KITTI's convention that
+means the car is oriented PERPENDICULAR to our direction of travel, close
+to our side -- not a car ahead of us on a collision course. Combined with
+the street photo (frame 000420.png: a narrow street, parked cars lining
+both sides), this is almost certainly a **parked car we're driving closely
+past**, not a forward lead vehicle. `z` decreasing steadily reflects OUR
+motion along the street, not the car closing in on us. `LeadSelector`
+rejecting it via the lane-band check is very likely the CORRECT behavior,
+not a bug -- I picked this track using only "longest run with a defined
+ground-truth TTC," which doesn't distinguish a real forward lead from a
+parked car we happen to pass closely. That's a real gap in how the test
+case was chosen, not in the pipeline.
+
+**The `lead_ttc.py` change from the previous entry is being kept, not
+reverted** -- grandfathering the self-detection check for an
+already-established lead is still a reasonable defensive improvement in
+principle (a genuine forward lead car legitimately could fill the bottom
+of frame at very close range) -- but it should be described as
+**untested**, not as a verified fix, since it did not actually address
+what caused the observed failure on this clip.
+
+**What's still true and stands from the previous entry:** the occlusion-
+driven ID switches (2 -> 8 -> 15) and their effect on tracking continuity
+are real and unaffected by this correction -- only the self-detection-filter
+explanation for the FINAL gap (frames ~380-430) is retracted. The real
+gating reason for that final gap is the lane-band check doing what it's
+supposed to on an object that was never a genuine lead-vehicle candidate.
+
+**Better candidates identified for re-testing** (scored across all
+sequences' labels for: mostly in-lane, `|sin(rotation_y)| < 0.4` i.e.
+genuinely forward/opposite-facing, a long run of defined ground-truth TTC,
+closing to under 20 m): sequence `0009` track 1 (65 frames, forward-facing
+100% of the time, z from 46.4 m down to 3.1 m) looks like the strongest
+real forward-closing lead-vehicle candidate found so far. Its images are
+not downloaded yet (only sequence 0019's are). Not yet run.
+
+---
+
+## 2026-09-28 (cont.) — Sequence 0009 track 1 tried: still not a clean forward-lead example, and a broader lesson
+
+Extracted sequence `0009`'s images (~800 MB) and ran the same real pipeline
+against ground-truth track 1, which had scored well on "mostly in-lane,
+forward-facing, closing to under 20 m." Also fixed `kitti_pipeline_compare.py`
+to read the actual image size per sequence instead of assuming one (KITTI
+sequences aren't all the same resolution: 0019 is 1238x374, 0009 is
+1242x375).
+
+**Result: 0 of 45 frames where our pipeline had a lead matched GT track 1.**
+Checked whether this was another bug before concluding anything: our
+detector actually tracks this car well (as our own track ID 14, boxes
+closely matching GT's by eye across frames 10-60), so detection isn't the
+problem. The real reason is that its box drifts steadily rightward out of
+the lane band as the sequence progresses (center-frame at frame 20, past
+the right edge of the band by frame 30+). Looked at the actual image
+(`data/kitti/training/image_02/0009/000030.png`): this is a black sedan
+pulling out of a driveway/parking lot on the right side of a two-lane
+street -- real crossing/merging traffic, not a car steadily ahead of us in
+our lane. `rotation_y` near pi (which I'd used as a "forward-facing" filter)
+didn't rule this out, because a car turning to merge into the road can
+still average out to roughly the same heading as through-traffic over a
+short window.
+
+**The broader lesson, worth keeping regardless of whether a clean example
+is found:** finding a genuine "textbook" example (steady, straight-line,
+same-lane closing) in real driving footage is harder than a metadata filter
+on rotation/lateral-position can guarantee. Two out of two candidate tracks
+picked this way (0019 track 42, 0009 track 1) turned out to be a parked car
+and a merging car respectively, not a simple lead vehicle -- which itself
+says something real about how much of the "closing distance" signal in
+ordinary driving footage comes from geometrically complex situations
+(turns, merges, parked/passing vehicles), not highway-style following. That
+matters for the project's own scope: `LeadSelector`'s lane-band approach is
+built for the simple case, and both of these examples are exactly the kind
+of situation it's correctly NOT designed to treat as a lead vehicle.
+
+**Not resolved:** still no real, ground-truth-backed test of a genuine
+forward-closing lead car through the full pipeline. Given the effort spent
+finding two bad candidates, the next attempt should probably start from
+looking at a few candidate sequences' images directly (or scanning multiple
+frames' images, not just metadata) before running the full pipeline again,
+rather than trusting a metadata filter alone.
+
+---
+
+## 2026-09-28 (cont.) — Scope decision, and a cheap real extension: TTC for every nearby vehicle
+
+**Decision, prompted by the KITTI findings above.** Rather than chase a
+bigger fix (trying to detect merges/cross-traffic/turning intent -- a real
+trajectory-prediction problem, out of scope for the time available),
+`CLAUDE.md` now says explicitly that lead-vehicle detection targets steady
+same-lane following, and that the parked-car/merging-car cases found today
+are the system correctly staying in scope, not a gap. Added a "Scope"
+section and a "Not doing" line for cut-in/merge/intent prediction.
+
+**A real, cheap extension that was worth doing anyway: `NearbyVehicleTTC`
+(`lead_ttc.py`).** Reports TTC for EVERY tracked vehicle, not just the one
+`LeadSelector` picks as lead -- same box-width-expansion method, one
+`TTCKalman` per track id instead of one singleton, including the same
+edge-truncation handling from earlier today. This is deliberately NOT a
+second lead-selector or any kind of intent/relevance judgment -- it only
+answers "how is each visible vehicle's box growing," the same question
+already being asked for the lead, applied to everything else in view.
+Filters for vehicles not seen in over a second are dropped, so a long clip
+doesn't accumulate a filter per track id forever (a lesson from today's
+`kitti_track.py` OOM debugging, applied preemptively here).
+
+**Tried on real footage** (not synthetic): `nearby_ttc.py` runs it over
+`track.py`'s existing `clip1_30s_tracks.csv` output (no new detection run
+needed) and produces both a CSV and a plot
+(`outputs/clip1_30s_nearby_ttc.png`) -- 4,313 rows across 75 tracked
+vehicles, 40 with at least 15 frames shown on the plot. Visually, this is a
+much busier picture than the single-lead TTC plots from Week 2: many
+vehicles dip below an illustrative 8 s line at different points through the
+clip, which is exactly the situational-awareness picture this is meant to
+show, and a more honest impression of a real traffic scene than a single
+TTC line.
+
+**Not yet done:** deciding which of these tracks are worth surfacing in the
+eventual Streamlit report (probably: nearby vehicles above some size/
+duration threshold, not all 75, most of which are brief/far/noisy); wiring
+this into a per-clip summary rather than a raw per-vehicle plot.
 
 ---
 
