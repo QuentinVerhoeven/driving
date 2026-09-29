@@ -991,4 +991,18 @@ this into a per-clip summary rather than a raw per-vehicle plot.
 
 ---
 
+---
+
+## 2026-09-28 (cont.) — Scope change #2: no more self-recorded footage or phone sensor logging
+
+**Decision:** earlier today's change already dropped live real-time capture. This is a separate, bigger cut: no more driving of my own at all, for time reasons. The whole project runs on downloaded/public video and datasets from here on (KITTI, BDD100K, YouTube-style dashcam clips). `clip1_30s.mov` (already recorded in Week 1-2) stays in the repo and stays useful for detection/tracking/lead-selection/TTC, but it has no GPS/accelerometer log and now never will, so it drops out of anything needing ego motion (distance, speed, headway, speeding, accelerometer-based hard braking).
+
+**The problem this creates:** Week 3 as originally planned ("GPS/accelerometer logging, calibration, distance, headway, core events") assumed a phone sensor-logging app recording alongside my own dashcam video. With no more of my own drives, there's no way to get a real, frame-synced ego-motion log for downloaded video — a YouTube dashcam clip has video only.
+
+**The fix:** KITTI's `oxts` files (already downloaded for the TTC ground-truth check earlier today) are exactly a GPS+IMU log, one row per frame, already frame-synced to the video — `parse_oxts_file()` in `kitti_gt_ttc.py` already reads them (built earlier today for a sanity check that ended up not being needed for TTC, since KITTI's 3D `z` already has ego motion baked in — now it turns out to be needed after all, just for a different piece). Relevant columns: `vf` (forward ego speed, m/s), `af` (forward acceleration — sustained strongly negative = hard braking), plus `calib` gives real camera intrinsics/extrinsics for ground-plane-geometry distance, and the label file's 3D `z` is LiDAR-derived ground truth to check that distance estimate against. This is arguably better than a phone log would have been: properly calibrated, exactly synced, with ground truth already available — and it directly satisfies the evaluation plan's existing "distance accuracy on KITTI, by range" bullet instead of adding a separate one.
+
+**What this costs, said plainly:** the "speeding" check (Week 4, GPS speed vs OSM speed limit) can only ever be validated on KITTI, since only KITTI has real GPS lat/lon in this project now — a downloaded video with no GPS can't be checked against a speed limit at all, so that pipeline stage will only ever run/report on KITTI sequences unless a future clip happens to include its own GPS log. Being upfront about that now rather than discovering it silently later.
+
+**Updated CLAUDE.md:** deliverable wording ("downloaded drive recording," not "real drive recording"), Environment/Sensor section, Pipeline's ego-speed line, evaluation plan's event-detection bullet (dropped "my own drives", added KITTI), roadmap Weeks 3-4 reworded, "Not doing" gets a new line, current-status paragraph updated.
+
 <!-- Add new dated entries above this line as the project progresses. -->
