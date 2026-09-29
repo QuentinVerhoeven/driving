@@ -56,6 +56,17 @@ MIN_EVENT_S = 0.3   # same value used throughout the project for "sustained", se
 EDGE_MARGIN_PX = 2.0
 FPS = 10.0
 
+# Found 2026-09-28 running this on the FULL (not truncated) 0009 sequence: in a busy scene with
+# many simultaneously-visible candidate vehicles, LeadSelector's lead can legitimately switch to a
+# genuinely different real vehicle every few hundred ms, and EVERY such switch resets TTCKalman's
+# state by design (a new track_id might be a different car). For a few frames after any switch, the
+# filter is converging from a cold start on immature width measurements, and can report a spuriously
+# fast-dropping TTC that has nothing to do with real closing behaviour -- confirmed to be the cause of
+# every rapid-closing event found on 0009's full 803-frame run (see NOTES.md). Distance/headway are
+# NOT affected: they're computed fresh from the current frame's box position each time, with no
+# Kalman state to reset, so only rapid-closing (which depends on TTC's rate estimate) needs this guard.
+MIN_TRUST_AFTER_SWITCH_S = 1.0
+
 
 def sustained_below(is_below: pd.Series, min_s=MIN_EVENT_S, dt_s=FRAME_DT_S):
     """True for frames inside a run of is_below==True that lasts >= min_s
@@ -118,12 +129,18 @@ def main():
     kalman = TTCKalman(frame_w)
 
     lead_rows = []
+    last_lead_id, lead_switch_time = None, None
     for frame, g in tracks.groupby("frame"):
         t = frame / FPS
         boxes = [Box(track_id=int(r.track_id), x1=r.x1, y1=r.y1, x2=r.x2, y2=r.y2) for r in g.itertuples()]
         lead = selector.update(boxes, t)
         if lead is None:
             continue
+
+        if lead.track_id != last_lead_id:
+            lead_switch_time = t
+            last_lead_id = lead.track_id
+        time_since_switch = t - lead_switch_time
 
         edge_touch = lead.x1 <= EDGE_MARGIN_PX or lead.x2 >= frame_w - EDGE_MARGIN_PX
         _, _, ttc_s = kalman.update(lead.w, t, lead.track_id, truncated=edge_touch)
@@ -133,7 +150,8 @@ def main():
         # the object is at or beyond infinite distance).
 
         lead_rows.append({"frame": frame, "lead_track_id": lead.track_id,
-                           "distance_m": distance_m, "ttc_s": ttc_s})
+                           "distance_m": distance_m, "ttc_s": ttc_s,
+                           "time_since_lead_switch_s": time_since_switch})
 
     lead_df = pd.DataFrame(lead_rows)
 
@@ -146,7 +164,9 @@ def main():
     # headway up to meaningless huge numbers, not a real "safe" reading.
 
     out["tailgating"] = sustained_below(out["headway_s"] < TAILGATING_HEADWAY_S)
-    out["rapid_closing"] = sustained_below((out["ttc_s"] < RAPID_CLOSING_TTC_S) & out["ttc_s"].notna())
+    ttc_trustworthy = (out["ttc_s"] < RAPID_CLOSING_TTC_S) & out["ttc_s"].notna() \
+        & (out["time_since_lead_switch_s"] >= MIN_TRUST_AFTER_SWITCH_S)
+    out["rapid_closing"] = sustained_below(ttc_trustworthy)
 
     out_csv = f"outputs/kitti_{sequence}_headway_events.csv"
     out.to_csv(out_csv, index=False)
