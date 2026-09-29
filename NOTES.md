@@ -1073,4 +1073,25 @@ Next: headway = distance / ego speed, combining this with `kitti_ego_motion.py`'
 
 Week 3 is now functionally complete end to end (distance, ego speed, headway, tailgating/rapid-closing/hard-braking events), tested on real KITTI data with real detector/tracker noise, not synthetic fixtures. Next: Week 4 (speeding, GPS vs OSM speed limits) or polishing/applying this pipeline to a downloaded non-KITTI clip for the annotated-video deliverable -- decide which next.
 
+---
+
+## 2026-09-28 (cont.) — Week 4: speeding detection (GPS vs OSM speed limits)
+
+**Only runs on KITTI** -- it's the only source in this project with real GPS coordinates now (see the scope-change entry above); a downloaded/YouTube-style dashcam clip has no GPS to check against a speed limit at all. Logged as a known, permanent limitation of this feature, not a bug to fix later.
+
+**Method (`kitti_speeding.py`):**
+1. Download the real road network around the sequence's GPS trace ONCE via `osmnx` (a single Overpass API query, bounding box = the trace's lat/lon range + ~300m padding) -- not per-frame, since the road data doesn't change frame to frame.
+2. Match every frame's `(lat, lon)` to its nearest road edge in one vectorized call (`ox.distance.nearest_edges`).
+3. Read that edge's `maxspeed` tag. Handled honestly, not assumed: the tag can be missing (many minor roads are untagged in OSM), a list (different directions of the same road can carry different limits -- take the lower, the conservative reading), or a non-numeric zone code -- `parse_maxspeed()` returns `None` for anything not confidently parseable, and those frames are EXCLUDED from speeding detection, never treated as "no limit = compliant."
+4. Ego speed = oxts `vf` (already used for headway), in km/h.
+5. **Speeding event** = ego speed > matched limit + `SPEEDING_MARGIN_KPH` (5 km/h, allowing for GPS/tag noise) for at least 0.3s sustained -- same time-based streak rule used everywhere else in this project (`sustained_above`, the mirror image of `kitti_headway_events.sustained_below`).
+
+**Verified on two real sequences, both honestly reported, not cherry-picked for a clean result:**
+- **0019**: 100% tag coverage (1059/1059 frames) -- turned out to be a single 30 km/h residential street ("Blumenstraße") for the whole clip. Ego speed never exceeds ~20.6 km/h. 0 events -- correct, nothing to flag.
+- **0009**: 59% tag coverage (477/803 frames) -- a real, honest gap, not every frame's road segment carries an OSM tag. Speed ramps up to a real 50 km/h zone and peaks at **~53.5 km/h against the matched 50 km/h limit** -- 3.5 km/h over, but under the 5 km/h margin, so correctly NOT flagged. This is a good concrete demonstration of the margin doing its job: a real, near-miss excess that shouldn't trigger a "speeding" event on noisy GPS data, and doesn't.
+
+**Why 100% coverage on 0019 isn't suspicious, checked rather than assumed:** the road network downloaded for that sequence only had 58 edges total (a small, single-neighborhood query) and German OSM road-tagging is generally quite complete for residential streets -- so a small, fully-tagged local area is plausible, not a sign the matching is broken. 0009's 59% partial coverage on a larger, more varied road network is the more typical case and matches the honest-coverage-reporting requirement in CLAUDE.md directly.
+
+Week 4 done. Next: Week 5 (pothole detection) or applying the finished pipeline to a downloaded non-KITTI clip for the annotated-video deliverable.
+
 <!-- Add new dated entries above this line as the project progresses. -->
