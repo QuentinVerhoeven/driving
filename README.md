@@ -8,7 +8,11 @@ Portfolio project built to be explainable end-to-end, not just demoed: every des
 
 ## Status
 
-Weeks 1–2 complete (detection, tracking, lead-vehicle selection, Kalman-filtered TTC on recorded clips). Live real-time capture (an earlier plan) was built and tested against fake cameras, then dropped from scope to focus on recorded video given time constraints — see `CLAUDE.md`'s Scope section and `NOTES.md`, 2026-09-28. Current work: GPS/accelerometer logging, distance, headway, and core event detection.
+Weeks 1–4 complete: detection, tracking, lead-vehicle selection, Kalman-filtered TTC, ground-plane distance, ego speed/headway, core events (tailgating/rapid-closing/hard-braking), and speeding detection (GPS vs. OSM limits) — all built and evaluated on real KITTI data. Live real-time capture (an earlier plan) was built and tested against fake cameras, then dropped from scope to focus on recorded/downloaded video given time constraints — see `CLAUDE.md`'s Scope section and `NOTES.md`, 2026-09-28.
+
+## Demo
+
+`outputs/kitti_0020_annotated.mp4` — the full pipeline (detection, tracking, lead selection, TTC, distance, headway, speeding, and event flags) overlaid on a real Autobahn traffic sequence. Picked after screening all 21 KITTI tracking sequences and visually checking candidates, not just the first one downloaded — see `NOTES.md`, 2026-09-28. This one has real, sustained heavy-traffic tailgating (headway hovering ~1.9s for over 6 seconds) and genuine closing events, not just a quiet clip with nothing happening.
 
 ## Results
 
@@ -29,6 +33,19 @@ Accurate at practical following distances, degrades sharply with range -- an exp
 |---|---|---|---|---|
 | 0019 | 100% (1059/1059 frames) | 20.6 km/h | 30 km/h | no (correct) |
 | 0009 | 59% (477/803 frames) | 53.5 km/h | 50 km/h | no (correctly under the 5 km/h noise margin) |
+| 0020 | 100% (837/837 frames) | 53.8 km/h | steps 30→50→100 km/h | no (congestion-limited, correct) |
+
+Sequence 0020's matched limit steps exactly where the real road changes (residential → arterial → Autobahn), cross-checked against a literal "100" speed-limit sign visible in the footage at that point — a nice independent confirmation the road-matching is working, not just the threshold logic.
+
+**Core events (tailgating / rapid closing / hard braking)**, on the same three sequences, using our full detector+tracker output (not ground-truth boxes):
+
+| sequence | tailgating | rapid closing | hard braking | note |
+|---|---|---|---|---|
+| 0019 | 0 | 0 | 0 | quiet clip (turned out to be a pedestrian plaza, not a road — see Demo note) |
+| 0009 | 1 | 6 | 0 | busy merge-heavy area; some events likely reflect the Scope limitation below, not confirmed either way |
+| 0020 | 5 (incl. a genuine 6.6s sustained stretch at ~1.9s headway) | 2 | 0 | real heavy-traffic congestion |
+
+No sequence in the whole 21-sequence KITTI tracking set ever exceeds the 0.3g hard-braking threshold (peak across all of them is ≈-2.8 m/s²) — these are short urban/highway clips, not near-miss footage, so 0 hard-braking recall here reflects the dataset, not a pipeline gap.
 
 Only runs on KITTI, the only source in this project with real GPS — a downloaded dashcam clip has no GPS to check against a speed limit at all.
 
