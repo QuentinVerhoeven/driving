@@ -1147,4 +1147,25 @@ Both major deliverables now have something real behind them: the annotated video
 
 This sequence is now the primary candidate for the annotated-video deliverable; 0009/0019 remain useful as secondary/varied test cases (including their known limitations) for the evaluation set, precisely because they're NOT all clean congestion scenes -- a real evaluation benefits from variety, not just the best-looking clip.
 
+---
+
+## 2026-09-28 (cont.) — Event detection precision/recall, against real ground truth
+
+**The problem with "hand-labeled ground truth":** there's no real labeling team on a portfolio project. Instead, built an OBJECTIVE ground-truth event timeline (`kitti_event_eval.py`) using the exact same algorithm as the real pipeline (`LeadSelector`, unchanged), just fed KITTI's real ground-truth 2D boxes instead of our detector's noisy ones, with distance from real LiDAR-derived depth (label `z`, not the fitted ground-plane model) and TTC from real `dz/dt` (`kitti_gt_ttc.compute_gt_ttc`, already built). Same thresholds (`TAILGATING_HEADWAY_S`, `RAPID_CLOSING_TTC_S`, `MIN_EVENT_S`) applied to this clean signal. This tests exactly what matters -- does the noisy real pipeline agree with what a perfect-information version would conclude -- without needing a subjective human labeler.
+
+**Hard braking excluded on purpose**: both "predicted" and "ground truth" would read the identical raw oxts `af` value with no detector step in between -- comparing them is a tautology (100/100), not a real test, so it's left out of precision/recall rather than padding the results.
+
+**Pooled results across all 3 sequences (0019, 0009, 0020), 2699 frames:**
+
+| event | precision | recall | tp | fp | fn |
+|---|---|---|---|---|---|
+| tailgating | 0.58 | 0.99 | 69 | 50 | 1 |
+| rapid closing | 0.44 | 0.14 | 26 | 33 | 160 |
+
+**Investigated both headline numbers rather than just reporting them:**
+- **Tailgating's 50 false positives, checked**: every single one falls in frames 481-623 of sequence 0020 -- the EXACT same real 6.6s heavy-traffic tailgating window already found and reported (recall here is 0.98, so ground truth mostly agrees this window is real too). The pipeline isn't inventing a fake event; it's correctly finding the real one but drawing its boundary slightly wider than ground truth's. Most likely cause: this window sits around 20-40m range, where `kitti_distance.py`'s ground-plane fit has real, already-documented error (several meters median) -- enough to push predicted headway either side of the 2.0s threshold right at the edges of a real event, without needing anything to be "wrong" about lead selection.
+- **Rapid-closing's 160 false negatives, checked** (37 of them in detail, seq 0020, frames 403-766): a lead WAS present in 37/37 of these frames (not a missed detection), but the pipeline's own TTC reading during those exact frames had a median of 19.3s -- nothing close to the 4s threshold, a real, substantial disagreement with ground truth's TTC, not just borderline noise. This points to the pipeline either tracking a genuinely different vehicle than KITTI's ground-truth-selected lead in these windows, or `TTCKalman`'s rate estimate disagreeing sharply with the true `dz/dt` -- both plausible given everything already found today (lead-selection depends on noisy detected boxes matching KITTI's exact-lane-band assumptions, and TTC is sensitive to detector box-width noise). Not fully root-caused to one specific mechanism given time, but the false negatives are a real, substantial disagreement, not just threshold-edge noise.
+
+**Honest overall read**: the pipeline is trustworthy for catching real tailgating (recall 0.99) but over-triggers somewhat at event boundaries (precision 0.58) -- probably an acceptable tradeoff for a driver-facing tool (missing a real tailgating event is worse than a slightly-early/late one). Rapid-closing is the weaker of the two (recall 0.14) -- the pipeline misses most ground-truth-confirmed fast-closing moments, largely because its lead-selection/TTC disagrees with ground truth in those specific windows, not because nothing was detected at all. This is a genuine, currently-unresolved weak point, not a dataset artifact like hard-braking's exclusion. Saved per-sequence and pooled results (`outputs/kitti_{seq}_event_eval.csv`, `outputs/kitti_event_eval_summary.csv`).
+
 <!-- Add new dated entries above this line as the project progresses. -->
