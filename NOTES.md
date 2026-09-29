@@ -1094,4 +1094,19 @@ Week 3 is now functionally complete end to end (distance, ego speed, headway, ta
 
 Week 4 done. Next: Week 5 (pothole detection) or applying the finished pipeline to a downloaded non-KITTI clip for the annotated-video deliverable.
 
+---
+
+## 2026-09-28 (cont.) — Annotated-video deliverable
+
+**Built `kitti_annotate.py`**, combining every piece from this week into one overlay pass on a real KITTI sequence: draws every tracked box (green, id label), highlights whichever one `LeadSelector` currently calls the lead (orange, thicker, "LEAD" label), a top-left status block (ego speed + matched OSM limit, distance to lead, headway, TTC), and a red bottom banner naming any currently-active event (tailgating / rapid closing / hard braking / speeding), from the CSVs already produced by `kitti_headway_events.py` and `kitti_speeding.py` -- no new computation, purely a visualization pass.
+
+**Why KITTI, not an arbitrary downloaded dashcam clip:** `kitti_distance.py`'s ground-plane model was fit to KITTI's specific camera intrinsics and mounting height. Applying those same fitted numbers to a random YouTube dashcam with a different field of view would produce distance/headway numbers with no real meaning -- silently wrong, not just imprecise. Detection/tracking/box-width TTC are camera-independent and would be fine on any clip, but distance/headway/speeding aren't, so the full-pipeline annotated video uses KITTI, honestly labeled as a public research dataset rather than presented as "my dashcam."
+
+**Verified by pulling real frames out of the rendered video, not just trusting it ran without error:**
+- Frame 5 (seq 0009): boxes and status text all present and correctly matched to a real quiet moment (distance 55.7m, headway 8.6s, no lead yet flagged as an event).
+- Frame 50: shows the "RAPID CLOSING" banner -- this is the exact same lead-switch/cold-start false-positive event already investigated and documented earlier today (headway_events entry), now visibly confirmed in the rendered video rather than just in a CSV. Good cross-check that the annotation code is reading the right columns, not a new problem.
+- Frame 400: caught what looked like a real bug at first (the on-screen text looked like "58.7 km/h" against a ground-truth CSV value of 38.7 km/h at that frame) -- investigated before reporting it fixed or broken: a zoomed-in crop showed it actually reads "38.7 km/h" correctly, and the apparent "5" was just the bold black text outline (drawn at thickness 3 for legibility against variable backgrounds) making a "3" look doubled/bold at low resolution. False alarm, not a bug -- worth recording since "looks right on quick visual inspection" and "is actually right" are different checks, and this time a closer look was needed to tell them apart.
+
+Both major deliverables now have something real behind them: the annotated video (`outputs/kitti_0009_annotated.mp4`) and the quantitative evaluation (distance/TTC/speeding accuracy numbers already in README's Results table).
+
 <!-- Add new dated entries above this line as the project progresses. -->
