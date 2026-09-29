@@ -61,8 +61,16 @@ def parse_oxts_file(path: Path) -> pd.DataFrame:
 
     Adds a `frame` column (0-indexed, matching the label file's frame numbers)
     since the oxts file itself has no frame index.
+
+    Uses sep=r"\\s+" (collapsing whitespace), not a literal single space: KITTI's
+    oxts lines end with a trailing space, so a literal " " separator produces
+    one extra empty field per line, silently shifting every column name over
+    by one (found 2026-09-28 while building kitti_ego_motion.py -- vf read as
+    ~0 for a real sequence, which turned out to actually be vl's values, with
+    lat/lon themselves shifted into lon/alt). label_02 files don't have this
+    problem (no trailing space), so parse_label_file is unaffected.
     """
-    df = pd.read_csv(path, sep=" ", header=None, names=OXTS_COLUMNS)
+    df = pd.read_csv(path, sep=r"\s+", header=None, names=OXTS_COLUMNS)
     df.insert(0, "frame", range(len(df)))
     return df
 
