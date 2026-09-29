@@ -49,7 +49,16 @@ No sequence in the whole 21-sequence KITTI tracking set ever exceeds the 0.3g ha
 
 Only runs on KITTI, the only source in this project with real GPS — a downloaded dashcam clip has no GPS to check against a speed limit at all.
 
-*Still in progress: tracker comparison (ByteTrack vs. BoT-SORT, HOTA/IDF1) and event detection precision/recall on hand-labeled clips.*
+**Event detection precision/recall**, against an objective ground-truth timeline (KITTI's real 3D labels + real ego motion run through the same `LeadSelector` algorithm, not hand-labeled — see `NOTES.md`, 2026-09-28 for the method), pooled across all 3 sequences (2699 frames):
+
+| event | precision | recall |
+|---|---|---|
+| tailgating | 0.58 | 0.99 |
+| rapid closing | 0.44 | 0.14 |
+
+Investigated, not just reported: tailgating's false positives all fall inside the one real heavy-traffic tailgating window already found — the pipeline draws a slightly wider boundary around a real event, not a fabricated one, likely from ground-plane distance error at 20-40m range. Rapid-closing's low recall is a genuine, unresolved weak point: checked a sample of missed events and a lead vehicle *was* present the whole time, but the pipeline's TTC disagreed sharply with the true closing rate — a lead-identity or TTC-noise issue, not a missed detection. Hard braking is excluded from this table: both "predicted" and "ground truth" read the identical raw GPS/IMU value with no detector step in between, so comparing them would be a tautology, not a real test.
+
+*Still in progress: tracker comparison (ByteTrack vs. BoT-SORT, HOTA/IDF1).*
 
 ## Scope
 
