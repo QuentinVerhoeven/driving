@@ -1,6 +1,7 @@
 .venv/
 data/
 outputs/
+cache/
 *.pt
 __pycache__/
 scan_*.jpg

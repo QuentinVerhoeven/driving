@@ -23,6 +23,15 @@ Weeks 1–2 complete (detection, tracking, lead-vehicle selection, Kalman-filter
 
 Accurate at practical following distances, degrades sharply with range -- an expected, textbook property of monocular ground-plane distance (error grows roughly with the square of distance), not a bug. A metric depth model is the natural comparison at long range, planned but not yet built.
 
+**Speeding detection (GPS vs. OSM speed limits)**, verified on two KITTI sequences:
+
+| sequence | tag coverage | peak speed | matched limit | flagged? |
+|---|---|---|---|---|
+| 0019 | 100% (1059/1059 frames) | 20.6 km/h | 30 km/h | no (correct) |
+| 0009 | 59% (477/803 frames) | 53.5 km/h | 50 km/h | no (correctly under the 5 km/h noise margin) |
+
+Only runs on KITTI, the only source in this project with real GPS — a downloaded dashcam clip has no GPS to check against a speed limit at all.
+
 *Still in progress: tracker comparison (ByteTrack vs. BoT-SORT, HOTA/IDF1) and event detection precision/recall on hand-labeled clips.*
 
 ## Scope
