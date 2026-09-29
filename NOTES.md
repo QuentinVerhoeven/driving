@@ -1017,4 +1017,39 @@ this into a per-clip summary rather than a raw per-vehicle plot.
 
 **Result on KITTI 0019**: 1059 frames / 105.8s, speed range 0-20.6 km/h, 0 hard-braking events (peak deceleration ≈ -2.6 m/s², under the -3 m/s² threshold) -- consistent with a slow urban sequence, not a highway near-miss. Next: distance (ground-plane geometry + calib), validated against the label file's LiDAR-derived `z`, then headway = distance / ego speed.
 
+---
+
+## 2026-09-28 (cont.) — Week 3 step 2: distance from ground-plane geometry, fit and evaluated on KITTI
+
+**The model.** For a camera at height `H` above a flat ground plane with its optical axis roughly parallel to the ground, similar triangles give: `Z = (fy * H) / (v - v0)`, where `v` is the image row of an object's ground-contact point (approximated by its bounding box's *bottom* edge), `fy` is focal length in pixels, and `v0` is the image row the horizon sits at. Rearranged, `v` is linear in `1/Z`: `v = v0 + C/Z` with `C := fy * H`.
+
+**Design decision: fit `(v0, C)` by regression, don't assume a spec-sheet camera height.** Looking up "KITTI's rig is ~1.65m tall" and assuming `v0` = the calibrated principal point would bake in an assumption of exactly zero camera pitch, which is unlikely to hold exactly. Instead, `(v0, C)` are fit by ordinary linear regression (`np.polyfit`) of real labeled objects' `(1/z, bbox_bottom)` pairs against KITTI's own ground truth `z`. This is a real, checkable calibration step against real data rather than a trivia fact.
+
+**Filtering fit/eval points:** only `type == "Car"`, `truncated < 0.01`, `occluded <= 1`. A truncated or heavily occluded box's bottom edge isn't the true ground-contact point -- the same lesson as box-width TTC's truncation problem (2026-09-28, earlier today), just the vertical-edge version of it instead of the horizontal one.
+
+**Train/test split, so the evaluation is honest:** fit on sequence 0019 (686 clean Car boxes), then evaluate held-out on a *different* sequence, 0009 (1955 clean Car boxes) -- fitting and evaluating on the same recording would let the model memorize that specific camera/road's quirks instead of testing whether the geometry actually generalizes.
+
+**Fitted parameters** (`outputs/kitti_distance_fit_params.csv`):
+- `v0` (fitted horizon row) = 166.74 px
+- `C` (= fy·H) = 1424.2 px·m
+- `fy` (from sequence 0019's calib P2 matrix) = 718.3 px
+- implied camera height `H = C/fy` = **1.98 m** -- plausible for a roof-mounted rig (real KITTI vehicle height is usually cited around ~1.65m, so this is a bit high, but the *effective* v0/C split doesn't have to equal the literal physical height: some of any real camera pitch gets absorbed into how the two fitted parameters trade off against each other. The right read is "this is a geometrically sane order of magnitude," not "this measures the physical rig to the centimeter."
+
+**Held-out accuracy by range** (`outputs/kitti_0009_distance_by_range.csv`), median absolute error:
+
+| range (m) | n objects | median \|error\| (m) | mean \|error\| (m) |
+|---|---|---|---|
+| 0-10  | 179 | 0.71  | 0.82  |
+| 10-20 | 476 | 1.23  | 1.84  |
+| 20-40 | 797 | 4.61  | 9.34  |
+| 40+   | 503 | 12.22 | 20.13 |
+
+**Honest read of this result:** the model is genuinely good at close range (under 1m median error inside 10m -- plausibly good enough for tailgating/headway at the ranges that matter most) and degrades sharply with distance, badly so past 40m (median error over 12m, i.e. >25% relative). This isn't a bug -- it's the textbook failure mode of monocular ground-plane distance: `dZ/dv` scales roughly as `Z²/(fy·H)`, so the SAME one-pixel measurement noise (annotation imprecision, road undulation breaking the flat-ground assumption, a slightly-off bbox) produces quadratically larger distance error the farther away the object is, because `v` asymptotically approaches `v0` as `Z -> infinity` and the signal-to-noise in `v` collapses. The scatter plot (`outputs/kitti_distance_fit_and_eval.png`, right panel) shows this directly: tight against the perfect-prediction line under ~20m, then fanning out wildly (some 50m-true objects predicted at 150m+) beyond that.
+
+**What this means for the project:** ground-plane distance is trustworthy for headway/tailgating at practical following distances, but should NOT be trusted at long range -- exactly the comparison CLAUDE.md's evaluation plan already calls for ("ground-plane geometry vs a depth model, reported by range"). A metric depth model is the natural next comparison for the far-range case, later, not a fix needed right now.
+
+**Not investigated yet:** a cluster of close-range fit points sits exactly at `bbox_bottom = 374` (sequence 0019's image height) despite passing the `truncated < 0.01` filter -- plausibly just real objects whose true ground-contact point is legitimately near the bottom of a short (374px) frame at close range, not a labeling bug, but not confirmed. Worth a second look if close-range accuracy ever needs improving.
+
+Next: headway = distance / ego speed, combining this with `kitti_ego_motion.py`'s `vf`.
+
 <!-- Add new dated entries above this line as the project progresses. -->

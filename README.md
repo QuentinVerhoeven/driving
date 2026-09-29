@@ -12,7 +12,18 @@ Weeks 1–2 complete (detection, tracking, lead-vehicle selection, Kalman-filter
 
 ## Results
 
-*Evaluation in progress. This table will report distance accuracy on KITTI (by range), tracker comparison (ByteTrack vs. BoT-SORT, HOTA/IDF1), and event detection precision/recall on hand-labeled clips, once each is complete.*
+**Distance accuracy on KITTI, by range** (ground-plane geometry fit on sequence 0019, evaluated held-out on sequence 0009 -- see `NOTES.md`, 2026-09-28 for the fitting method and full discussion):
+
+| range (m) | n objects | median \|error\| (m) |
+|---|---|---|
+| 0-10  | 179 | 0.71  |
+| 10-20 | 476 | 1.23  |
+| 20-40 | 797 | 4.61  |
+| 40+   | 503 | 12.22 |
+
+Accurate at practical following distances, degrades sharply with range -- an expected, textbook property of monocular ground-plane distance (error grows roughly with the square of distance), not a bug. A metric depth model is the natural comparison at long range, planned but not yet built.
+
+*Still in progress: tracker comparison (ByteTrack vs. BoT-SORT, HOTA/IDF1) and event detection precision/recall on hand-labeled clips.*
 
 ## Scope
 
