@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-from lead_ttc import BAND_HALF_WIDTH, Box, LeadSelector, TTCKalman
+from lead_ttc import BAND_HALF_WIDTH, Box, LeadSelector, NearbyVehicleTTC, TTCKalman
 
 # COCO class IDs we care about (same as track.py)
 VEHICLE_CLASSES = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
@@ -143,6 +143,7 @@ class FrameResult:
     lead: object    # the chosen lead Box, or None
     ttc: float      # Kalman TTC in seconds (nan = no meaningful value), or None if there is no lead
     t: float        # timestamp of the frame this was computed from
+    nearby_ttc: dict = None   # track_id -> ttc (s) for EVERY tracked box, not just the lead (situational awareness)
 
 
 class Pipeline:
@@ -154,6 +155,7 @@ class Pipeline:
         # created ONCE: their memory must survive across frames
         self.selector = LeadSelector(frame_w, frame_h, args.band, args.lane_offset)
         self.kalman = TTCKalman(frame_w)
+        self.nearby = NearbyVehicleTTC(frame_w)   # TTC per box, keyed by track id -- see draw_overlay
         self.n = 0              # frames processed so far
         self.yolo_ms = []       # how long each YOLO call took
         self.lead_counts = {}   # how many frames each track id was the lead
@@ -175,13 +177,15 @@ class Pipeline:
 
         boxes = to_boxes(r)
         lead = self.selector.update(boxes, t)
+        nearby = self.nearby.update(boxes, t)   # {track_id: (width, rate, ttc)} for every box this frame
+        nearby_ttc = {tid: ttc for tid, (_, _, ttc) in nearby.items()}
         ttc = None
         if lead is not None:
             self.lead_counts[lead.track_id] = self.lead_counts.get(lead.track_id, 0) + 1
             _, _, ttc = self.kalman.update(lead.w, t, lead.track_id)
             self.log_rows.append((frame_id, round(t, 3), lead.track_id, round(lead.w, 1), ttc))
         self.n += 1
-        return FrameResult(boxes, lead, ttc, t)
+        return FrameResult(boxes, lead, ttc, t, nearby_ttc)
 
 
 class InferenceWorker:
@@ -264,6 +268,14 @@ def ttc_label(ttc):
     return f"TTC {ttc:.1f} s"
 
 
+def short_ttc_label(ttc):
+    """Compact form for a per-box label (id + TTC together) -- ttc_label's full text is too
+    wide to put on every box without the frame turning into a wall of text."""
+    if ttc is None or ttc != ttc:
+        return ""
+    return " >10s" if ttc > 10 else f" {ttc:.1f}s"
+
+
 def draw_banner(img, text):
     """A big red warning line across the middle of the frame."""
     h, w = img.shape[:2]
@@ -275,10 +287,15 @@ def draw_banner(img, text):
     cv2.putText(img, text, (x, y), FONT, 1.4 * s, (0, 0, 255), thick)
 
 
-def draw_overlay(img, res, info=None, band=None):
-    """Draw a FrameResult onto img (in place): lane band, every box + id, the lead in green, TTC readout.
+def draw_overlay(img, res, info=None):
+    """Draw a FrameResult onto img (in place): every box + id + its own TTC (situational
+    awareness, not just the lead), the lead in green with a corner readout.
 
-    Sizes scale with the frame width so it looks the same at 640 px and at 4K. `band` = (left, right) as fractions of the width.
+    Sizes scale with the frame width so it looks the same at 640 px and at 4K.
+
+    Lane-band guide lines used to be drawn here too (useful while diagnosing the band-width
+    bug, 2026-09-29) -- removed for the finished demo, since a viewer doesn't need to see the
+    selection internals, just the result.
     """
     h, w = img.shape[:2]
     s = w / 1280
@@ -289,20 +306,18 @@ def draw_overlay(img, res, info=None, band=None):
 
     if info:
         cv2.putText(img, info, (int(10 * hs), int(30 * hs)), FONT, 0.6 * hs, (0, 255, 0), hud_thick)
-    if band:
-        for frac in band:                    # the "in my lane" band
-            x = int(frac * w)
-            cv2.line(img, (x, 0), (x, h), (255, 255, 255), thin)
     if res is None:
         return
 
+    nearby_ttc = res.nearby_ttc or {}
     for b in res.boxes:
         cv2.rectangle(img, (int(b.x1), int(b.y1)), (int(b.x2), int(b.y2)), (255, 255, 255), thin)
-        cv2.putText(img, f"id {b.track_id}", (int(b.x1), max(int(b.y1) - 5, 15)), FONT, max(0.4, 0.5 * s), (255, 255, 255), thin)
+        label = f"id {b.track_id}" + short_ttc_label(nearby_ttc.get(b.track_id))
+        cv2.putText(img, label, (int(b.x1), max(int(b.y1) - 5, 15)), FONT, max(0.4, 0.5 * s), (255, 255, 255), thin)
     if res.lead is not None:
         b = res.lead
         cv2.rectangle(img, (int(b.x1), int(b.y1)), (int(b.x2), int(b.y2)), (0, 255, 0), thick)
-        # TTC goes in a fixed corner readout, not on the box: over a small distant box it was unreadable
+        # TTC goes in a fixed corner readout too, not just on the box: over a small distant box it was unreadable
         cv2.putText(img, f"LEAD id {b.track_id}   {ttc_label(res.ttc)}", (int(10 * hs), int(75 * hs)), FONT, 1.0 * hs, (0, 255, 0), hud_thick)
 
 
@@ -361,7 +376,7 @@ def run_file(cap, pipeline, writer, args, src_fps, rotate_code):
                 fps = (len(loop_times) - 1) / (loop_times[-1] - loop_times[0])
             if pipeline.n % 20 == 0:
                 print(f"  processed {pipeline.n} (frame {frame_idx}): {fps:.1f} fps, YOLO {statistics.median(pipeline.yolo_ms[-20:]):.0f} ms/frame")
-        draw_overlay(frame, res, f"model {fps:.1f} fps (stride {args.stride}) | {lane_info(pipeline.selector)}", pipeline.selector.band())
+        draw_overlay(frame, res, f"model {fps:.1f} fps (stride {args.stride}) | {lane_info(pipeline.selector)}")
 
         if writer:
             writer.write(frame)
@@ -419,7 +434,7 @@ def run_camera(cap, pipeline, writer, args, rotate_code):
             stalled = res is not None and (t_capture - t_origin) - res.t > STALE_OVERLAY_S
             if stalled:
                 res = None      # the model has not produced anything recent: do not show an old TTC on a new picture
-            draw_overlay(img, res, info, pipeline.selector.band())
+            draw_overlay(img, res, info)
             if stalled:
                 draw_banner(img, "MODEL STALLED")
 

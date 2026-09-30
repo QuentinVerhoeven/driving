@@ -1243,4 +1243,18 @@ Under the narrower scope (detection/tracking/lead/TTC/rapid-closing only, camera
 
 Net result: a second, real, honestly-verified demo clip, showing the pipeline works on arbitrary downloaded video (not just KITTI), with a genuine dramatic TTC reading and a real example of the Scope boundary being respected rather than silently papered over.
 
+---
+
+## 2026-09-29 (cont.) — Per-vehicle TTC wired into the videos, band lines removed, hard braking explained
+
+**Three asks, handled separately:**
+
+1. **"Why is there no hard braking for the autobahn clip?"** Not an oversight -- hard braking was dropped in the scope cut specifically because it needs real accelerometer data (KITTI's oxts). A downloaded YouTube clip has no accelerometer log at all -- the only "speed" signal visible is the dashcam's own burned-in speedometer graphic, and reading that would mean building OCR, a real new feature, not something already built. Left honestly absent rather than faked with a proxy (e.g. TTC trend is a *relative* closing-rate signal, not ego's own deceleration, and conflating the two would misrepresent what's actually being measured).
+
+2. **Per-vehicle TTC wired into both rendered videos.** `NearbyVehicleTTC` (`lead_ttc.py`) was built back on 2026-09-28 for exactly this ("situational awareness" -- TTC for every tracked vehicle, not just the lead) but had never actually been connected to a rendered video before now. Wired into `kitti_annotate.py` (per-box label, e.g. `id7 4.0s`) and into `live.py`'s `Pipeline`/`draw_overlay` (`FrameResult` gained a `nearby_ttc` dict, computed alongside the lead's own TTC each frame, same underlying filter class). No new computation logic -- purely connecting an already-built, already-documented piece that had been sitting unused.
+
+3. **Lane-band guide lines removed from both renderers.** They were the right call while actively diagnosing the band-width bug (2026-09-29, earlier entries) -- made the reasoning visible. Now that the bug is fixed and understood, they're just diagnostic clutter in a finished demo; a viewer doesn't need to see the selection internals, just the result. Removed the drawing code from `kitti_annotate.py` and `live.py`'s `draw_overlay` (the `band` parameter and its call-site arguments were removed too, not just commented out).
+
+Re-rendered both `outputs/kitti_0020_annotated.mp4` and `outputs/autobahn_braking_annotated.mp4`; spot-checked real frames to confirm per-box TTC labels render correctly and no band lines remain.
+
 <!-- Add new dated entries above this line as the project progresses. -->
