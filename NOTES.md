@@ -1273,4 +1273,18 @@ Re-rendered both `outputs/kitti_0020_annotated.mp4` and `outputs/autobahn_brakin
 
 **Applied and reverified end to end**: `TTCKalman`'s default q changed 5e-5 -> 1e-3 in `lead_ttc.py`. Re-ran the full pipeline for 0020 and the autobahn clip (`--log` this time, to get the real per-frame values, not just eyeball the video). The autobahn near-miss's filtered TTC minimum went from 1.27s to **0.68s** -- close to the raw signal's true minimum, and a much more honest reflection of how close that moment really was. Re-rendered both demo videos.
 
+---
+
+## 2026-09-30 — A third demo clip tried and dropped, not forced to work
+
+Tried a second non-KITTI dashcam clip (a real 60s street-driving clip, trimmed from a longer downloaded video) as a possible third demo, alongside the KITTI 0020 and autobahn clips already working.
+
+**Same lane-band issue found again, third clip in a row.** At the default (KITTI-tuned) `band_half=0.07`, a close van directly ahead was missed (`cx_frac=0.610`, well outside the `0.57` boundary) -- same pattern as the autobahn clip. Checked with real data before touching anything: simulated `LeadSelector` at `0.07` vs `0.15` across the whole clip using a full box scan (not just the one frame) -- `0.15` nearly doubled lead coverage (828 -> 1479 of 1748 frames) AND cut switching by 3x (971 -> 333), confirming it was a real, clip-wide problem, not a one-off.
+
+**A second, different problem surfaced after widening.** At `band_half=0.15`, a large parked/stationary truck sitting within the band out-competed the real (smaller, farther) lead van by raw box area (10,011px² vs 7,764px²) for a stretch of frames, even once the real van was clearly detected. This is NOT a band-position problem -- both vehicles were legitimately inside the band; it's the "pick the biggest in-band box" heuristic losing to a parked vehicle, the same underlying class of issue as the KITTI parked-car finding from 2026-09-28, just manifesting differently (there it was about lane-band exclusion; here the parked vehicle is IN the band and simply bigger).
+
+**Decision: drop this clip rather than keep patching it.** Three separate band-width-adjacent issues across three clips in one day (KITTI's multi-lane exclusion, this clip's coverage gap, this clip's parked-truck size problem) is a real, repeated signal that the fixed "one band width + pick biggest box" heuristic is near the edge of what it can handle reliably without a genuinely smarter approach (e.g. distance-aware banding, or lead-continuity preference over raw size -- both discussed and deliberately deferred earlier, see the 2026-09-29 lane-band entries). Rather than keep tuning per-clip, kept the two already-working, already-verified demos (KITTI 0020, the autobahn clip) as the final set. The clip and its rendered outputs were deleted (not committed, was just a test) -- nothing to freeze, this was pure exploration that didn't pan out.
+
+This is the same honesty pattern used throughout the project: a real limitation found through testing, decided on deliberately, not silently forced to look better than it is.
+
 <!-- Add new dated entries above this line as the project progresses. -->

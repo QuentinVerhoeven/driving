@@ -12,12 +12,19 @@ Detection, tracking, lead-vehicle selection, and Kalman-filtered TTC are working
 
 ## Demo
 
-Two clips, same pipeline, proving it's camera-independent — no KITTI-specific code involved in either:
+Two clips, same pipeline, proving it's camera-independent — no KITTI-specific code involved in either. Full videos are in `outputs/` (not committed — see below); the GIFs here are short excerpts for a quick look.
 
-- `outputs/kitti_0020_annotated.mp4` — a real KITTI Autobahn traffic sequence. Picked after screening all 21 KITTI tracking sequences and visually checking candidates, not just the first one downloaded — see `NOTES.md`, 2026-09-28.
-- `outputs/autobahn_braking_annotated.mp4` — a real downloaded dashcam clip (no KITTI dependency at all), showing a genuine near-collision: TTC drops to **1.3s** at the closest approach. Also shows the system correctly recognizing when a car leaves the same lane (a real lane-change during the clip's emergency maneuver) and stopping the lead label rather than keeping a stale, wrong pick — see `NOTES.md`, 2026-09-29.
+**KITTI Autobahn (sequence 0020)** — picked after screening all 21 KITTI tracking sequences and visually checking candidates, not just the first one downloaded (see `NOTES.md`, 2026-09-28). Excerpt below shows a real rapid-closing flag around t=76s.
+
+![KITTI 0020 demo](assets/kitti_0020_demo.gif)
+
+**Autobahn braking clip** — a real downloaded dashcam clip (no KITTI dependency at all), showing a genuine near-collision: TTC drops to **1.3s** at the closest approach (excerpt below shows the closest-approach window, TTC bottoming at 0.68s). Also shows the system correctly recognizing when a car leaves the same lane (a real lane-change during the clip's emergency maneuver) and stopping the lead label rather than keeping a stale, wrong pick — see `NOTES.md`, 2026-09-29.
+
+![Autobahn braking demo](assets/autobahn_braking_demo.gif)
 
 Both show boxes, tracking, lane-band guide lines (so a lead pick is explainable, not arbitrary), the lead highlight, TTC, and the rapid-closing flag.
+
+A third clip (a single-lane street dashcam recording) was tried but didn't produce a usable demo — see `NOTES.md`, 2026-09-29/30. The final lineup is these two clips.
 
 ## A real bug, found and fixed
 
@@ -53,6 +60,10 @@ In addition to the single selected lead vehicle, the system reports TTC for **ev
 ## Also explored, dropped for time — not accuracy
 
 An earlier, larger version of this project also built (and validated on real data): ground-plane distance from calibration (fit and evaluated by range against KITTI's LiDAR ground truth), ego speed and hard braking from real GPS/IMU logs, speed-limit checking against real OpenStreetMap data, and an objective ground-truth-based precision/recall evaluation of event detection. This all worked and produced real numbers — it was cut on 2026-09-29 to focus effort on the one deliverable that matters most (the annotated video), not because it failed. The code is frozen in the repo (`kitti_distance.py`, `kitti_ego_motion.py`, `kitti_speeding.py`, `kitti_event_eval.py`), and the full results and reasoning are in `NOTES.md`.
+
+## Reproducing
+
+`uv sync` installs the pinned CPU-only dependency set (`uv.lock` is committed and checked clean). The code runs on any dashcam-style video via `live.py`'s file mode; reproducing the exact demo outputs above additionally requires the source footage, which isn't in the repo (both too large and, for KITTI, redistributed under its own license) — download KITTI tracking sequence 0020 separately, or supply your own clip.
 
 ## Not doing
 
