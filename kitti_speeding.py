@@ -1,4 +1,9 @@
 """
+FROZEN 2026-09-29: dropped in that day's scope cut (GPS/calibration-dependent
+features + quantitative evaluation removed as deliverables -- see NOTES.md).
+Kept in the repo as real, completed, honestly-documented work, not deleted.
+Not run or extended further; nothing downstream depends on it anymore.
+
 Week 4: speeding detection -- ego GPS speed vs. OpenStreetMap speed-limit tags.
 
 Only runs on KITTI: it's the only source in this project with real GPS

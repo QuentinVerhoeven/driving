@@ -1,21 +1,18 @@
 """
-Annotated-video deliverable: overlay boxes, TTC, distance, headway, and event
-flags on a real KITTI drive sequence, combining every piece built this week
-(kitti_track.py's tracked boxes, kitti_headway_events.py's per-frame
-distance/TTC/headway/events, kitti_speeding.py's per-frame speed/limit).
+Annotated-video deliverable: overlay boxes, the lane band, the selected lead,
+TTC, and the rapid-closing event flag on a real KITTI drive sequence.
+Combines kitti_track.py's tracked boxes with kitti_headway_events.py's
+per-frame lead/TTC/rapid-closing output.
 
-Why KITTI and not an arbitrary downloaded dashcam clip: the ground-plane
-distance model (kitti_distance.py) was fit specifically to KITTI's camera
-intrinsics and mounting height. Applying those fitted (v0, C) constants to a
-random YouTube dashcam with a different field of view/mounting would produce
-distance numbers with no real meaning -- silently wrong, not just imprecise.
-Detection/tracking/box-width TTC don't have this problem (they're camera-
-independent), but distance/headway/speeding do, so the full-pipeline
-annotated video uses KITTI, a real public driving dataset, honestly labeled
-as such rather than presented as "my dashcam."
+Trimmed 2026-09-29 (see NOTES.md): this used to also overlay distance,
+headway, ego speed/speed-limit, tailgating, and hard braking -- all of which
+needed KITTI's oxts/calib (GPS+IMU), dropped in that day's scope cut. What's
+left (boxes, lane band, lead, TTC, rapid-closing) is camera-independent, so
+this same script's approach (and live.py's file mode) now works on any
+video, KITTI or not.
 
 Usage:
-    uv run python kitti_annotate.py 0009
+    uv run python kitti_annotate.py 0020
 """
 
 import argparse
@@ -33,12 +30,12 @@ OTHER_COLOR = (0, 200, 0)      # green -- every other tracked vehicle
 EVENT_COLOR = (0, 0, 255)      # red -- event banner
 BAND_COLOR = (0, 255, 255)     # yellow -- lane-band guide lines
 
-# How long to keep showing the last known status text/event flags through a
-# brief lead-loss gap, purely a rendering choice (see module docstring) --
-# found 2026-09-28 that ~90% of KITTI 0020's lead-loss gaps are only 1-4
-# frames (0.1-0.4s), and blanking the text for each one made the video look
-# like it was constantly flickering even though the underlying detection is
-# fine. Doesn't change any CSV/algorithm output, only what's drawn on screen.
+# How long to keep showing the last known TTC/event flags through a brief
+# lead-loss gap, purely a rendering choice (see module docstring) -- found
+# 2026-09-28 that ~90% of KITTI 0020's lead-loss gaps are only 1-4 frames
+# (0.1-0.4s), and blanking the text for each one made the video look like it
+# was constantly flickering even though the underlying detection is fine.
+# Doesn't change any CSV/algorithm output, only what's drawn on screen.
 GRACE_FRAMES = 5
 
 
@@ -57,7 +54,6 @@ def main():
 
     tracks = pd.read_csv(f"outputs/kitti_{sequence}_tracks.csv")
     events = pd.read_csv(f"outputs/kitti_{sequence}_headway_events.csv").set_index("frame")
-    speeding = pd.read_csv(f"outputs/kitti_{sequence}_speeding.csv").set_index("frame")
 
     img_dir = Path(f"data/kitti/training/image_02/{sequence}")
     frames = sorted(img_dir.glob("*.png"))
@@ -73,8 +69,9 @@ def main():
     # (BAND_HALF_WIDTH, center_offset=0.0, matching kitti_headway_events.py's
     # LeadSelector(frame_w, frame_h) call). Drawn so a viewer can see WHY a
     # given car is or isn't eligible to be the lead, instead of it looking
-    # arbitrary -- see NOTES.md, 2026-09-28 (a car that looks like "the real
-    # lead" to a human can be in an adjacent lane, just outside this band).
+    # arbitrary -- see NOTES.md, 2026-09-28/29 (a car that looks like "the
+    # real lead" to a human can be in an adjacent lane, just outside this
+    # band -- this exact confusion is what led to retuning BAND_HALF_WIDTH).
     band_lo = int((0.5 - BAND_HALF_WIDTH) * w)
     band_hi = int((0.5 + BAND_HALF_WIDTH) * w)
 
@@ -84,14 +81,13 @@ def main():
     for frame_idx, path in enumerate(frames):
         img = cv2.imread(str(path))
         ev = events.loc[frame_idx] if frame_idx in events.index else None
-        sp = speeding.loc[frame_idx] if frame_idx in speeding.index else None
         lead_id = ev["lead_track_id"] if ev is not None and pd.notna(ev["lead_track_id"]) else None
 
         # Same grace period as the text below: if the real lead is missing for
         # only a few frames, keep treating its last known track_id as the lead
         # for HIGHLIGHTING purposes too, so the box and the text agree -- a
-        # box drawn orange with no "distance to lead" text (or vice versa)
-        # looks like a bug even when each half is individually correct.
+        # box drawn orange with no TTC text (or vice versa) looks like a bug
+        # even when each half is individually correct.
         display_lead_id = lead_id if lead_id is not None else (
             last_good_lead_id if frames_since_good < GRACE_FRAMES else None)
 
@@ -110,36 +106,13 @@ def main():
                 label = f"LEAD id{r.track_id}" if is_lead else f"id{r.track_id}"
                 cv2.putText(img, label, (int(r.x1), int(r.y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
-        # top-left status block. The ego-speed line is independent of whether
-        # a lead is currently tracked, so it's kept separate from the
-        # lead-derived lines below -- otherwise it would always count as "a
-        # reading present" and defeat the grace-period hold below (found
-        # while checking a real gap frame: the speed line alone was silently
-        # replacing the held-over distance/headway/TTC instead of preserving
-        # them).
-        speed_line = []
-        if sp is not None and pd.notna(sp["speed_kph"]):
-            limit_str = f"{sp['speed_limit_kph']:.0f}" if pd.notna(sp["speed_limit_kph"]) else "?"
-            speed_line = [f"ego speed: {sp['speed_kph']:.1f} km/h (limit {limit_str})"]
-
         lead_lines = []
-        if ev is not None and pd.notna(ev["distance_m"]):
-            lead_lines.append(f"distance to lead: {ev['distance_m']:.1f} m")
-        if ev is not None and pd.notna(ev["headway_s"]):
-            lead_lines.append(f"headway: {ev['headway_s']:.1f} s")
         if ev is not None and pd.notna(ev["ttc_s"]):
             lead_lines.append(f"TTC: {ev['ttc_s']:.1f} s")
 
         active = []
-        if ev is not None:
-            if ev.get("tailgating"):
-                active.append("TAILGATING")
-            if ev.get("rapid_closing"):
-                active.append("RAPID CLOSING")
-            if ev.get("hard_braking"):
-                active.append("HARD BRAKING")
-        if sp is not None and sp.get("speeding"):
-            active.append("SPEEDING")
+        if ev is not None and ev.get("rapid_closing"):
+            active.append("RAPID CLOSING")
 
         # Grace period: a lead lost for only a few frames (median gap on real
         # KITTI data is ~3 frames = 0.3s -- see NOTES.md, 2026-09-28) keeps
@@ -155,7 +128,7 @@ def main():
             if frames_since_good <= GRACE_FRAMES:
                 lead_lines, active = last_good_lines, last_good_active
 
-        draw_text_block(img, speed_line + lead_lines, 10, 25)
+        draw_text_block(img, lead_lines, 10, 25)
 
         if active:
             banner = " | ".join(active)

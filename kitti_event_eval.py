@@ -1,4 +1,12 @@
 """
+FROZEN 2026-09-29: dropped in that day's scope cut (quantitative evaluation
+removed as a deliverable -- see NOTES.md). Kept in the repo as real,
+completed, honestly-documented work, not deleted. Note: the underlying
+"run LeadSelector on ground-truth boxes" idea in `ground_truth_events` below
+was reused (not frozen) for kitti_band_tune.py's lane-band retuning, since
+that part has no GPS/oxts dependency and survived the scope cut. This whole
+file's tailgating comparison is what's frozen; the reusable idea lives on.
+
 Event detection precision/recall: compare our FULL pipeline's detected
 tailgating/rapid-closing events (real detector + tracker + LeadSelector +
 TTCKalman + fitted ground-plane distance) against an objective ground-truth
