@@ -1168,4 +1168,22 @@ This sequence is now the primary candidate for the annotated-video deliverable; 
 
 **Honest overall read**: the pipeline is trustworthy for catching real tailgating (recall 0.99) but over-triggers somewhat at event boundaries (precision 0.58) -- probably an acceptable tradeoff for a driver-facing tool (missing a real tailgating event is worse than a slightly-early/late one). Rapid-closing is the weaker of the two (recall 0.14) -- the pipeline misses most ground-truth-confirmed fast-closing moments, largely because its lead-selection/TTC disagrees with ground truth in those specific windows, not because nothing was detected at all. This is a genuine, currently-unresolved weak point, not a dataset artifact like hard-braking's exclusion. Saved per-sequence and pooled results (`outputs/kitti_{seq}_event_eval.csv`, `outputs/kitti_event_eval_summary.csv`).
 
+---
+
+## 2026-09-28 (cont.) — Fixing the annotated video's visual quality (real complaint, investigated)
+
+**User feedback**: "it constantly tells the wrong car as the lead car, the reading flickers in and out sometimes." Investigated both before changing anything, rather than guessing at a fix.
+
+**Quantified the flicker first**: on 0020, lead track_id changes 116 times over 837 frames -- roughly once every 0.7s. Most lead-loss gaps are short (median 3 frames = 0.3s, only 1 gap out of 19 longer than 10 frames).
+
+**Checked a concrete "wrong car" example, not just the aggregate stats**: pulled frame 123, where `LEAD id4` was a small, far car while a closer, more visually obvious van/wagon cluster sat unlabeled in the middle of the frame. Checked the actual box coordinates: id4's box center was well inside the lane band (`[496.8, 745.2]` px on a 1242px-wide frame), while the van/wagon cluster's centers were outside it (in the adjacent lane) -- so the pick was arguably *correct* per the same-lane-only design, just invisible/confusing to a viewer with no way to see where the band actually is. Also found a real contributing bug: track 26's box center sat at x=499.9, just ~3px inside the 496.8 boundary -- exactly the kind of borderline lane-band membership that would flicker in and out with ordinary detection jitter. Logged honestly as a real, understood limitation of the fixed-fraction lane-band heuristic on wide multi-lane roads (tuned originally on clip1_30s, a different camera/mount) -- NOT retuned here, since changing a validated constant based on one clip's subjective impression, without re-checking it against the other already-validated clips, would be reckless.
+
+**Two rendering-only fixes to `kitti_annotate.py`** (neither touches `LeadSelector`/`TTCKalman` or any CSV output -- purely what gets drawn):
+1. **Lane-band guide lines**: draws the actual band `LeadSelector` uses (translucent yellow region + boundary lines), so a viewer can see why a given car is or isn't eligible, instead of the pick looking arbitrary.
+2. **Grace-period hold** (`GRACE_FRAMES=5`): a lead lost for a few frames keeps showing its last known reading (text AND the highlighted box) instead of blanking, since ~90% of real lead-loss gaps are too brief to represent a genuine change -- reduces the on-screen flicker without ever holding a stale reading longer than 0.5s.
+
+**A real bug caught and fixed while building this**, not left in: the first version of the text-hold logic checked `if lines:` where `lines` always included the ego-speed line (independent of lead status) -- meaning the grace period never actually triggered, since a non-empty list (just the speed line) always looked like "a fresh good reading" and silently overwrote the held-over distance/headway/TTC values. Caught by checking an actual gap frame's screenshot (showed only the speed line, not the expected held values) rather than assuming the code worked because it ran without error. Fixed by separating the always-present speed line from the lead-dependent lines, and applying the grace hold only to the latter. Also synced the box highlight to the same grace state, so the box and the text never disagree (checked frame-by-frame across a real gap to confirm: held together at the start, and blank together exactly when the grace period expires).
+
+Re-rendered `outputs/kitti_0020_annotated.mp4` with both fixes; verified visually on 3 separate frames (a real lane-band-correct-but-confusing pick, a real held-over gap, and a fresh real lead reappearing after the gap).
+
 <!-- Add new dated entries above this line as the project progresses. -->
