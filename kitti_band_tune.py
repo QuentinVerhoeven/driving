@@ -47,7 +47,7 @@ from kitti_gt_ttc import FRAME_DT_S, parse_label_file
 from lead_ttc import Box, LeadSelector
 
 SEQUENCES = ["0019", "0009", "0020"]
-CANDIDATE_WIDTHS = [0.06, 0.07, 0.08, 0.09, 0.10]
+CANDIDATE_WIDTHS = [0.06, 0.07, 0.075, 0.08, 0.09, 0.10, 0.12, 0.15]
 IOU_MATCH_THRESHOLD = 0.3   # same threshold used in kitti_pipeline_compare.py
 
 

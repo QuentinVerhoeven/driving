@@ -1287,4 +1287,76 @@ Tried a second non-KITTI dashcam clip (a real 60s street-driving clip, trimmed f
 
 This is the same honesty pattern used throughout the project: a real limitation found through testing, decided on deliberately, not silently forced to look better than it is.
 
+---
+
+## 2026-09-30 (cont.) — Rapid-closing banner wired into live.py; a real gap it couldn't close; docs consistency pass
+
+**Found a real gap while thinking about how to make the demo more compelling**: `kitti_annotate.py` (the offline KITTI renderer) already draws a RAPID CLOSING banner when the sustained-TTC-drop rule fires, but `live.py` (the renderer actually used for the autobahn dashcam clip) never had this wired in at all -- the README's claim that both demos show "the rapid-closing flag" was quietly false for one of the two demos.
+
+**Fixed the gap, not just patched it locally.** Moved the detector logic out of `kitti_headway_events.py`'s pandas-vectorized batch code into a new `RapidClosingDetector` class in `lead_ttc.py`, written to run one frame at a time (same design pattern as `LeadSelector`'s own switch/missing-streak tracking: a track_id change resets state, a sustained-below-threshold streak must clear both `MIN_FRAMES` and `MIN_EVENT_S` before firing). `kitti_headway_events.py` now imports its threshold constants (`RAPID_CLOSING_TTC_S`, `MIN_TRUST_AFTER_SWITCH_S`) from `lead_ttc.py` instead of defining its own copies, so the two paths can't silently drift apart again. Wired the new class into `live.py`'s `Pipeline`/`FrameResult`/`draw_overlay` (a red banner, same visual language as `kitti_annotate.py`'s) and into its CSV log (new `rapid_closing` column). Unit-tested the class standalone first (switch/trust/nan/no-lead cases) before touching real video.
+
+**Re-rendered the autobahn clip and found the flag never fires on it.** Checked `outputs/autobahn_braking_ttc_log.csv` after the re-render: despite two genuine fast-closing events already documented (track 160's TTC sustained 1.0-1.5s for over a second; track 104 bottoming at 0.68s), `rapid_closing` is `False` on every single frame. Root cause, found by reading the actual per-track durations, not guessed: this clip is a continuous overtake, so every individual lead track is short-lived (0.27-0.97s) -- shorter than `MIN_TRUST_AFTER_SWITCH_S` (1.0s, the guard against reporting on a Kalman filter that's still cold-starting on a fresh track_id) plus `MIN_EVENT_S` (0.3s, the minimum sustained-streak length) combined. The flag isn't broken; the clip's driving style structurally can't clear the guard in time.
+
+**Grid-searched `MIN_TRUST_AFTER_SWITCH_S` against real KITTI ground truth before touching it** (delegated as a subagent task; verified the artifacts and numbers myself afterward) -- `kitti_trust_tune.py`, candidates 0.0 through 1.0, scored by event-level agreement across all 3 KITTI sequences, with particular attention to sequence 0009 (the busy multi-candidate scene this constant was created to protect, 2026-09-28). Result: a genuine structural conflict, not a tuning gap.
+
+| trust_s | 0009 false-positive events | 0009 true-positive events | autobahn flagged frames |
+|---|---|---|---|
+| 1.0 (current) | 0 | 1 | 0 |
+| 0.7 | 0 | 1 | 0 |
+| 0.65 | 1 | 2 | 1 |
+| 0.6 | 1 | 2 | 3 |
+| 0.5 | 2 | 3 | 6 |
+| 0.3 | 2 | 3 | 13 |
+| 0.0 | 3 | 3 | 15 |
+
+Track 160 (the closest miss) can only be rescued at trust ≤ ~0.65s -- but that's exactly where 0009 starts producing a spurious event it didn't have before. There is no honest single value in the tested range that fixes the autobahn clip without regressing the noisy-sequence case. Track 104 (bottoming at 0.68s TTC) can *never* trigger the flag regardless of this constant -- its whole below-4s-threshold window is only 0.066s, shorter than `MIN_EVENT_S` itself; that one is a duration problem, not a trust-window problem.
+
+**Decision: left `MIN_TRUST_AFTER_SWITCH_S` at 1.0s, documented the gap as a known limitation instead of forcing a fix.** Same pattern as the third-clip decision above and the q-retune decision: real investigation with real numbers, a real tradeoff found, decided against rather than quietly patched. A duration-aware or per-clip trust window might resolve this properly, but that's a bigger design change than tuning one constant, and out of scope for today.
+
+**Also found in passing, not fixed:** `kitti_event_eval.py` (frozen since the 2026-09-29 scope cut) currently fails to import -- it references `TAILGATING_HEADWAY_S`, which was removed from `kitti_headway_events.py` in that same cut. Left alone (out of current scope, file is frozen by design), but worth knowing the frozen GPS-evaluation code doesn't run standalone as-is if anyone tries it later.
+
+**Documentation consistency pass.** README.md and CLAUDE.md had drifted from reality across several of today's earlier changes: the autobahn clip's headline TTC number was still the pre-retune "1.3s" instead of the current "0.68s"; both docs claimed lane-band guide lines are shown in the demo videos, when they were removed the same day; the "situational awareness" pipeline description read as if per-vehicle TTC labels are an active part of the shipped demo, when they were added and reverted the same day; and CLAUDE.md's Roadmap/Current-status sections were frozen at the band-bug-fix stage, several days of real work behind. All fixed to reflect the actual current state, with the same evidence-over-assertion standard as everywhere else in this file.
+
+Also re-verified the q retune from a fresh angle: extended `kitti_kalman_tune.py`'s grid to include larger candidates (2e-3 through 1e-2) to check whether loosening q further would help the autobahn clip's Kalman lag (filtered TTC minimum 1.03s vs. the raw signal's 0.74s during the Golf overtake). It doesn't -- q=1e-3 remains a clean minimum on both fast-closing and overall accuracy; every larger value tested makes both worse. No change made.
+
+---
+
+## 2026-09-30 (cont.) — Corrected: the real fix was the lane band, not the trust window
+
+**User pushback caught a wrong conclusion.** After the entry above shipped `MIN_TRUST_AFTER_SWITCH_S` as a "can't be fixed, document and move on" limitation, told directly: "It should absolutely fire. The problem is that it doesn't make the lead car the lead car until way too late." That reframed the question correctly -- I'd been investigating why the TRUST WINDOW couldn't clear in time, without ever checking why the LEAD PICK itself was so late. Went back to real data instead of the existing lead-only log.
+
+**Root cause, found by dumping every raw detected box, not just the filtered lead output.** Wrote a one-off script to record every tracked box every frame (track_id, x1, x2, cx_frac) for the whole autobahn clip, independent of `LeadSelector`. Track 160 (the VW Golf) first appears at t=11.0s already sitting at `cx_frac` deviation 0.070 -- right at the 0.07 band boundary. From t=11.08s to t=15.25s (4.2 STRAIGHT SECONDS), it drifts to 0.071-0.081 deviation -- just outside the band -- while its width grows from 18px to 174px, visibly and continuously closing the whole time. It only re-enters the band at t=15.28s, by which point there's barely a second of runway left before closest approach. During that 4.2s gap the band was mostly EMPTY (no candidate at all) or held briefly by other small, noisy, short-lived boxes -- the selector wasn't confused, it was correctly obeying a band that excluded the one car that mattered.
+
+**This is the third occurrence of the same failure mode in three days**, all previously documented as separate incidents (KITTI 0020's adjacent-lane-car exclusion, 2026-09-29; the dropped third clip's coverage gap, 2026-09-30 morning) but not connected until this one showed up on the flagship demo clip too. A fixed-width lane band is structurally prone to this: any camera geometry where a real same-lane car's box center can drift a few percent past whatever boundary is chosen will have this exact problem waiting.
+
+**First check was wrong -- caught it before committing to it.** A raw-position-only check (max deviation over track 160's life = 0.081) suggested `band_half=0.075` would be "just enough." Re-simulating the REAL pipeline end to end (`LeadSelector` -> `TTCKalman` -> `RapidClosingDetector`, not just raw box positions) at 0.075 showed this was wrong: other real cars (ids 200, 220) legitimately grab the lead during a gap where 160 briefly drifts outside even the widened band, splitting 160's lead stint into two short pieces instead of one continuous one -- still too short to clear the trust+sustain window. Lesson: simulating a simplified proxy for a stateful pipeline (position-in-band) isn't the same as running the actual pipeline; the second, cheaper check would have shipped a wrong number.
+
+**Grid-searched again with the real pipeline, found the true minimum: `band_half=0.08`.** Extended `kitti_band_tune.py`'s candidate list (`CANDIDATE_WIDTHS`) to include 0.075/0.08/0.09/0.10/0.12/0.15, re-ran the ground-truth grid search across all 3 KITTI sequences, AND separately simulated the actual `LeadSelector`+`TTCKalman`+`RapidClosingDetector` chain against the autobahn clip's real detector output at each width. Result:
+
+| band_half | KITTI pooled agreement | 0009 | 0020 | autobahn: rapid_closing fires? |
+|---|---|---|---|---|
+| 0.07 (old) | 0.798 | 0.286 | 0.984 | no |
+| 0.075 | 0.808 | 0.331 | 0.978 | no (stint split by a gap) |
+| **0.08 (new)** | **0.790** | **0.295** | **0.968** | **yes -- 77+ frames** |
+| 0.09 | 0.767 | 0.340 | 0.914 | yes |
+| 0.10 | 0.713 | 0.325 | 0.832 | yes |
+
+0.08 is the minimum width where track 160 stays continuously in-band long enough to clear `MIN_TRUST_AFTER_SWITCH_S` (1.0s) + `MIN_EVENT_S` (0.3s). This is a real, honest, small tradeoff, not a free win the way 0.075 first looked: KITTI's pooled agreement drops slightly (0.798 -> 0.790) versus the current 0.07 -- sequence 0009 actually improves (0.286 -> 0.295) but 0020 dips a little (0.984 -> 0.968). Accepted the tradeoff: the drop is small, and it's what correctly flags a genuine near-miss on the flagship demo clip rather than silently missing it.
+
+**Applied and reverified end to end.** `BAND_HALF_WIDTH` in `lead_ttc.py` changed 0.07 -> 0.08. Re-rendered BOTH demo videos (`live.py` for the autobahn clip, `kitti_headway_events.py` + `kitti_annotate.py` for KITTI 0020 -- the band affects both). Confirmed in the fresh log: `rapid_closing=True` for 38 frames, t=15.05s-16.28s, right through the Golf's TTC bottoming at 1.03s. Pulled the actual rendered frame at t=15.7s and visually confirmed the red RAPID CLOSING banner renders correctly, alongside the lead box on the Golf and a TTC readout of 1.2s -- and, as a nice touch, the dashcam's own dashboard collision-warning icon is lit in the same frame, an unplanned but very good piece of corroborating real-world evidence. Regenerated both demo GIFs from the fresh videos (picked a new autobahn excerpt window, t=13.5-19.5s, that actually shows the banner -- the old excerpt window predated this fix).
+
+**What this says about the earlier "can't be fixed" conclusion**: it wasn't wrong given the question I was asking (grid-searching `MIN_TRUST_AFTER_SWITCH_S` genuinely has no honest fix), but it was the wrong QUESTION -- I was tuning a guard against a symptom (short lead-track duration) instead of checking why the duration was short in the first place (a late, band-caused lead pick). The user's pushback ("it doesn't make the lead car the lead car until way too late") pointed straight at the actual mechanism. Worth remembering for next time: when a downstream constant "can't be tuned to fix" a problem, check the upstream state it's operating on before concluding the problem is unfixable.
+
+A hysteresis-based lead-selection rule (don't drop a car from lead contention for one brief excursion outside the band, the way `SWITCH_TIME`/`LOST_TIME` already give some slack on ID changes) would likely fix this class of bug at the root without any KITTI cost at all -- noted as a real follow-up idea, not built today; today's fix is honest and validated, but a band-width number is still a blunter instrument than accounting for a track's recent trend.
+
+---
+
+## 2026-09-30 (cont.) — TTC urgency tiers: making the overlay more visually prominent
+
+User asked for something like a "collision chance" and, separately, for the TTC readout to be more visually prominent. Declined the first: a real collision-probability number needs a validated statistical or physics-based model (e.g. trained against labeled outcomes), which this project doesn't have and isn't going to build for a portfolio demo -- bolting a percentage onto TTC without that basis would be exactly the kind of overclaim the project has deliberately avoided everywhere else (see the "Not a safety system" framing, and the whole 2026-09-29 scope cut). Built the second instead: no new measurement, just better visual hierarchy for a number that's already real.
+
+**What was built.** `lead_ttc.ttc_urgency(ttc)`: a pure classifier (no drawing) returning "safe" / "caution" (< `RAPID_CLOSING_TTC_S`, 4.0s) / "urgent" (< a new `TTC_URGENT_S`, 2.0s). Wired into both renderers so they share the exact thresholds instead of two copies that could drift: `live.py`'s `draw_overlay` and `kitti_annotate.py`'s per-frame loop now color the lead box and TTC text green/yellow/red and grow the text/box thickness as TTC drops through these tiers. `kitti_annotate.py` needed a bit more care because of its grace-period hold-over logic (a brief lead-loss gap keeps showing the last reading) -- the held-over urgency/color/scale now travel together with the held-over TTC text so they can never show a mismatched color for a stale reading.
+
+**Verified visually, not just by reading the code.** Pulled a real frame from each demo after re-rendering: KITTI 0020 at t=76.5s shows TTC 3.5s in yellow with the RAPID CLOSING banner already active (caution tier, correctly below the 4.0s threshold); the autobahn clip at t=15.9s shows TTC 1.1s in large red text and a thick red box on the Golf, again with the banner active (urgent tier). Both re-rendered end to end and both demo GIFs regenerated from the fresh videos.
+
 <!-- Add new dated entries above this line as the project progresses. -->

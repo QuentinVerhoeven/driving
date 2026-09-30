@@ -16,15 +16,23 @@ from dataclasses import dataclass
 import numpy as np
 
 # --- lead-selection settings (values tuned on clip1_30s, see NOTES.md) ---
-# BAND_HALF_WIDTH retuned 2026-09-29 from 0.10 to 0.07: the original value was tuned on clip1_30s
-# (single-lane-each-way) and never checked against a multi-lane highway. On KITTI 0020 (a real
-# Autobahn scene) it let an adjacent-lane car win because it was numerically "in the band" while
-# being bigger/closer than the true same-lane traffic. Retuned by grid search against ground-truth
-# lead picks (LeadSelector run on real KITTI labels) across 3 sequences (kitti_band_tune.py) --
-# 0.07 gave the best pooled IoU-agreement (0.798 vs 0.713 at 0.10), and specifically fixed 0020
-# (0.83 -> 0.98 agreement) without hurting 0019 (stays >0.93) or clip1_30s (same lead identity
-# picked throughout at every width tested). See NOTES.md, 2026-09-29.
-BAND_HALF_WIDTH = 0.07   # "in my lane" = box center within +-7% of frame width from the (adjustable) center
+# BAND_HALF_WIDTH retuned 2026-09-30 from 0.07 to 0.08: investigating why the rapid-closing flag never
+# fired on the autobahn clip (see NOTES.md) found the true root cause wasn't the trust-window guard --
+# it was the band excluding a real, continuously-closing same-lane car (track 160) for most of its
+# approach because its box center drifted to 0.071-0.081 deviation, just past the 0.07 cutoff, while it
+# grew from 18px to 180px wide. Grid-searched BAND_HALF_WIDTH again against all 3 KITTI sequences
+# (kitti_band_tune.py) plus a direct LeadSelector+TTCKalman+RapidClosingDetector simulation against the
+# autobahn clip's real detector output (not just a raw-position check -- an earlier simulation wrongly
+# suggested 0.075 was enough; re-simulating the actual pipeline end to end showed 0.075 still leaves a gap
+# where other real cars grab the lead, splitting track 160's stint in two, and only 0.08 keeps it
+# continuously in band long enough to clear MIN_TRUST_AFTER_SWITCH_S + MIN_EVENT_S). This is a real,
+# small tradeoff, not a free win: KITTI pooled agreement drops slightly at 0.08 vs 0.07 (0.790 vs 0.798;
+# 0009 actually improves, 0.295 vs 0.286, but 0020 dips a little, 0.968 vs 0.984). Accepted because the
+# regression is small and the autobahn clip's rapid-closing flag firing on a genuine near-miss (see
+# NOTES.md, 2026-09-30) was judged worth it. A hysteresis-based approach (don't drop a car from
+# contention for one brief excursion outside the band) would likely fix this without any KITTI cost at
+# all, but is a bigger design change -- noted as a possible follow-up, not built today.
+BAND_HALF_WIDTH = 0.08   # "in my lane" = box center within +-8% of frame width from the (adjustable) center
 MAX_ASPECT_RATIO = 2.5   # w/h above this = self-detection of our own hood, not a car
 BOTTOM_MARGIN = 0.95     # boxes whose bottom edge is in the bottom 5% of the frame = our hood
 # Streaks are in SECONDS (and at least MIN_FRAMES frames), not frames: the live loop only sees ~10 frames/s, so a
@@ -235,6 +243,82 @@ class TTCKalman:
 
 EDGE_MARGIN_PX = 2.0     # box within this many px of x=0 or x=frame_w counts as truncated (see TTCKalman.update)
 STALE_AFTER_S = 1.0      # drop a vehicle's filter if it hasn't been seen for this long
+
+# --- rapid-closing event settings ---
+# These were originally defined only in kitti_headway_events.py (the offline KITTI batch script);
+# moved here so the same detector logic can run BOTH on a batch of KITTI frames and streaming, one
+# frame at a time, from live.py -- a single shared source of truth instead of two copies that could
+# drift apart. Values themselves are unchanged from the original (see kitti_headway_events.py's own
+# history for how they were chosen).
+RAPID_CLOSING_TTC_S = 4.0        # a commonly cited forward-collision-warning caution threshold, not tuned against ground truth
+MIN_EVENT_S = 0.3                # a closing streak must last this long (not a single noisy frame) to count, same "sustained" pattern as SWITCH_TIME/LOST_TIME above
+MIN_TRUST_AFTER_SWITCH_S = 1.0   # suppress the flag for this long after any lead switch: a fresh Kalman filter can report a spuriously fast-dropping TTC while it's still converging (see NOTES.md, 2026-09-28)
+
+# --- TTC urgency tiers, for making the overlay visually prominent as TTC drops ---
+# Purely a rendering choice (color/size), not a new measurement or claim -- TTC itself is unchanged.
+# TTC_URGENT_S reuses the same "how close is dangerous" judgment as RAPID_CLOSING_TTC_S's caution
+# tier, just adding one more, closer tier so the overlay escalates before the sustained-event banner
+# would even fire. Added 2026-09-30 at the user's request to make TTC more visually prominent.
+TTC_URGENT_S = 2.0   # below this, TTC readout turns red/urgent (also RapidClosingDetector's typical range once sustained)
+
+
+def ttc_urgency(ttc):
+    """Classify a TTC value into a tier name for display styling: 'safe' (no lead, nan, or TTC not
+    shrinking), 'caution' (< RAPID_CLOSING_TTC_S), or 'urgent' (< TTC_URGENT_S). Pure classification,
+    no drawing -- kept here so live.py and kitti_annotate.py render the exact same thresholds instead
+    of two copies that could drift.
+    """
+    if ttc is None or ttc != ttc or ttc <= 0:   # ttc != ttc guards nan
+        return "safe"
+    if ttc < TTC_URGENT_S:
+        return "urgent"
+    if ttc < RAPID_CLOSING_TTC_S:
+        return "caution"
+    return "safe"
+
+
+class RapidClosingDetector:
+    """Streaming version of kitti_headway_events.py's sustained-TTC-drop rule: flags a frame as part of a
+    rapid-closing event when TTC has been below RAPID_CLOSING_TTC_S for at least MIN_EVENT_S seconds (and
+    MIN_FRAMES frames), while trusting a fresh lead pick only after MIN_TRUST_AFTER_SWITCH_S seconds.
+
+    Same design as LeadSelector's own switch/missing streak tracking: a single noisy dip shouldn't flip
+    the flag on, and a brand new lead (fresh Kalman state, not yet converged) shouldn't either.
+    """
+
+    def __init__(self, ttc_threshold=RAPID_CLOSING_TTC_S, min_event_s=MIN_EVENT_S,
+                 min_trust_after_switch_s=MIN_TRUST_AFTER_SWITCH_S):
+        self.ttc_threshold = ttc_threshold
+        self.min_event_s = min_event_s
+        self.min_trust_after_switch_s = min_trust_after_switch_s
+        self.last_lead_id = None
+        self.lead_switch_time = None
+        self.below_since = None
+        self.below_n = 0
+
+    def update(self, ttc, t, lead_track_id):
+        """Feed one frame's TTC (may be nan/None), timestamp t (s), and current lead track_id (or None
+        if there is no lead this frame). Returns True if this frame is part of a sustained rapid-closing event.
+        """
+        if lead_track_id is None:
+            self.last_lead_id, self.lead_switch_time = None, None
+            self.below_since, self.below_n = None, 0
+            return False
+
+        if lead_track_id != self.last_lead_id:
+            self.last_lead_id, self.lead_switch_time = lead_track_id, t
+            self.below_since, self.below_n = None, 0
+
+        trustworthy = (t - self.lead_switch_time) >= self.min_trust_after_switch_s
+        is_below = trustworthy and ttc is not None and ttc == ttc and ttc < self.ttc_threshold   # ttc == ttc guards nan
+        if not is_below:
+            self.below_since, self.below_n = None, 0
+            return False
+
+        if self.below_since is None:
+            self.below_since = t
+        self.below_n += 1
+        return self.below_n >= MIN_FRAMES and (t - self.below_since) >= self.min_event_s
 
 
 class NearbyVehicleTTC:

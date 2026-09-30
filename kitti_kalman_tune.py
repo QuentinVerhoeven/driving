@@ -43,7 +43,7 @@ from kitti_gt_ttc import compute_gt_ttc, parse_label_file
 from lead_ttc import TTCKalman
 
 SEQUENCES = ["0019", "0009", "0020"]
-CANDIDATE_Q = [5e-5, 1e-4, 2e-4, 5e-4, 1e-3, 2e-3]
+CANDIDATE_Q = [5e-5, 1e-4, 2e-4, 5e-4, 1e-3, 2e-3, 3e-3, 5e-3, 1e-2]
 EDGE_MARGIN_PX = 2.0
 FAST_CLOSING_GT_TTC_S = 3.0   # the regime the autobahn near-miss falls into
 
