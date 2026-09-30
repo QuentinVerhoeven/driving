@@ -1,4 +1,10 @@
 """
+FROZEN 2026-09-29: dropped in that day's scope cut (GPS/calibration-dependent
+features + quantitative evaluation removed as deliverables -- see NOTES.md).
+Kept in the repo as real, completed, honestly-documented work, not deleted --
+same treatment live.py's camera mode got earlier in the project. Not run or
+extended further; nothing downstream depends on it anymore.
+
 Week 3, step 2: distance from ground-plane geometry, fit and validated against
 KITTI's LiDAR-derived ground truth (see CLAUDE.md's evaluation plan: "distance
 accuracy on KITTI (LiDAR ground truth), reported by range").

@@ -1,4 +1,9 @@
 """
+FROZEN 2026-09-29: dropped in that day's scope cut (GPS/calibration-dependent
+features + quantitative evaluation removed as deliverables -- see NOTES.md).
+Kept in the repo as real, completed, honestly-documented work, not deleted.
+Not run or extended further; nothing downstream depends on it anymore.
+
 Week 3, step 1: ego speed and hard-braking from KITTI's oxts log.
 
 No more phone GPS/accelerometer logging (see CLAUDE.md, NOTES.md 2026-09-28)

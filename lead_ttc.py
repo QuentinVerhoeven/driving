@@ -16,7 +16,15 @@ from dataclasses import dataclass
 import numpy as np
 
 # --- lead-selection settings (values tuned on clip1_30s, see NOTES.md) ---
-BAND_HALF_WIDTH = 0.10   # "in my lane" = box center within +-10% of frame width from the (adjustable) center
+# BAND_HALF_WIDTH retuned 2026-09-29 from 0.10 to 0.07: the original value was tuned on clip1_30s
+# (single-lane-each-way) and never checked against a multi-lane highway. On KITTI 0020 (a real
+# Autobahn scene) it let an adjacent-lane car win because it was numerically "in the band" while
+# being bigger/closer than the true same-lane traffic. Retuned by grid search against ground-truth
+# lead picks (LeadSelector run on real KITTI labels) across 3 sequences (kitti_band_tune.py) --
+# 0.07 gave the best pooled IoU-agreement (0.798 vs 0.713 at 0.10), and specifically fixed 0020
+# (0.83 -> 0.98 agreement) without hurting 0019 (stays >0.93) or clip1_30s (same lead identity
+# picked throughout at every width tested). See NOTES.md, 2026-09-29.
+BAND_HALF_WIDTH = 0.07   # "in my lane" = box center within +-7% of frame width from the (adjustable) center
 MAX_ASPECT_RATIO = 2.5   # w/h above this = self-detection of our own hood, not a car
 BOTTOM_MARGIN = 0.95     # boxes whose bottom edge is in the bottom 5% of the frame = our hood
 # Streaks are in SECONDS (and at least MIN_FRAMES frames), not frames: the live loop only sees ~10 frames/s, so a

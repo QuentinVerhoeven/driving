@@ -1186,4 +1186,45 @@ This sequence is now the primary candidate for the annotated-video deliverable; 
 
 Re-rendered `outputs/kitti_0020_annotated.mp4` with both fixes; verified visually on 3 separate frames (a real lane-band-correct-but-confusing pick, a real held-over gap, and a fresh real lead reappearing after the gap).
 
+---
+
+## 2026-09-29 — Real bug found and fixed: lane-band width, tuned against ground truth
+
+**User feedback**: "In the first 15 or so seconds the lead car is way ahead, the detector places the lead car as ones on the lane next to it." Investigated concretely before changing anything.
+
+**Root cause, confirmed not guessed**: pulled frame 0 of `outputs/kitti_0020_annotated.mp4` -- `LEAD id4` was numerically inside `LeadSelector`'s fixed lane band (`BAND_HALF_WIDTH=0.10`, i.e. 50%±10% of frame width), while a much closer, more visually obvious cluster of same-lane traffic sat just outside that same band. Checked whether this was a camera-calibration/principal-point issue first: read `data/kitti/training/calib/0020.txt`'s `P2` matrix, `cx=607.19` vs frame center `621` -- only ~1% off, ruled out. Real cause: `BAND_HALF_WIDTH=0.10` was tuned and validated on `clip1_30s` (a single-lane-each-way street, Week 2) and never checked against a wide multi-lane highway, where an adjacent-lane car can still fall inside the same fixed central band.
+
+**Fixed by tuning against ground truth, not guessing a number** (`kitti_band_tune.py`): reused the "run `LeadSelector` on real KITTI ground-truth 2D boxes" idea from `kitti_event_eval.py` (this part has no GPS/oxts dependency, so it's unaffected by the scope cut below) as the correct reference lead per frame. Grid-searched `band_half` in `[0.06, 0.07, 0.08, 0.09, 0.10]` across all 3 sequences, scoring each by IoU-matching our real detector's pick against the ground-truth pick. **0.07 won**: pooled agreement 0.798 vs. 0.713 at the old 0.10, and specifically fixed 0020 (0.832 -> 0.984 agreement) without hurting 0019 (stays >0.93 throughout) or changing which car gets picked on `clip1_30s` at any tested width (always the same track, just more/fewer brief drop-outs). 0009 stayed low (0.28-0.34) at every width tested -- a separate, already-documented issue (that sequence's merge-heavy scene), not something band width fixes.
+
+**Directly re-checked the exact complained-about window** (frames 0-149, the first 15s): agreement with ground truth went from 106/137 (77.4%) at the old width to 145/150 (96.7%) at the new one -- a real, measured fix of the reported problem, not just an aggregate number that happens to look better.
+
+**An honest correction caught mid-investigation**: frame 123 (the specific frame originally used to diagnose the bug) STILL picks `id4` after the fix -- initially looked like the fix hadn't worked. Checked directly: `id4`'s box (659.6, 181.4, 707.5, 217.5) matches the ground-truth pick (659.6, 179.9, 707.5, 215.7) almost exactly, IoU=0.91. **`id4` is actually the objectively correct lead car at that exact frame** -- a small, distant car that looks visually counter-intuitive as "the lead" without seeing the lane geometry, but is correct per real 3D ground truth. My own original "this looks wrong" reaction on that specific frame was mistaken, not a real disagreement with ground truth -- worth recording since it's exactly the kind of thing that's easy to state confidently and be wrong about without checking.
+
+Applied: `BAND_HALF_WIDTH` in `lead_ttc.py` changed from 0.10 to 0.07 (comment references this entry). Re-rendered `outputs/kitti_0020_annotated.mp4` and re-verified frames 0, 90, 550 by eye -- all show sane, defensible picks with the lane band now visible on screen.
+
+---
+
+## 2026-09-29 (cont.) — Major scope cut: drop GPS features, potholes, and quantitative evaluation
+
+**What prompted this**: after the lane-band bug (above) and a broader look at the project's direction, decided the GPS/multi-dataset evaluation surface (KITTI oxts/calib, OSM speeding, ground-truth-derived event precision/recall) had grown large while the one thing a viewer actually watches -- the annotated video's lead-vehicle pick -- had a real, undiagnosed bug. Rather than keep growing the evaluation surface, narrowed scope to put all remaining effort behind the one deliverable that has to look right.
+
+**Decision**: the project now has ONE deliverable (the annotated video), not two. Dropped:
+- Ground-plane distance (`kitti_distance.py`)
+- Headway, tailgating, hard braking (needed distance/ego-speed/accelerometer)
+- Speeding detection (`kitti_speeding.py`, needed GPS + OSM)
+- Pothole detection (never built beyond an earlier scoping discussion)
+- Quantitative evaluation as a deliverable, not replaced by anything else
+
+**Kept**: detection, tracking, lead-vehicle selection, box-width TTC, and the TTC-based rapid-closing event -- the camera-independent core that works on any video, KITTI or not.
+
+**Code changes**:
+- `kitti_headway_events.py` trimmed in place (same filename, narrower job): removed oxts loading, the distance-fit loading, and headway/tailgating/hard-braking computation. Now outputs just `frame`/`time_s`/`lead_track_id`/`ttc_s`/`rapid_closing`, still using `LeadSelector`+`TTCKalman` and the same `MIN_TRUST_AFTER_SWITCH_S` guard as before.
+- `kitti_annotate.py` trimmed: overlay is now boxes, the lane-band guide lines, the lead highlight (with the grace-period hold), TTC, and the rapid-closing banner only. No more ego-speed/limit, distance, headway, tailgating, or speeding lines.
+- `kitti_distance.py`, `kitti_ego_motion.py`, `kitti_speeding.py`, `kitti_event_eval.py` frozen (header comment added, not deleted) -- real, completed, honestly-documented work, kept as a record, same treatment `live.py`'s camera mode got earlier in the project.
+- `BAND_HALF_WIDTH` retuned the same day (see the entry above) -- a fix that's now more important than before, since the annotated video is the sole deliverable.
+
+**Deferred, not decided**: the "Stretch ML component" (accident anticipation on DoTA/CCD) wasn't explicitly addressed by this cut, but it lived under the same "evaluation surface" umbrella. Marked deprioritized/not-active in `CLAUDE.md`'s roadmap rather than deleted, since it wasn't explicitly ruled out.
+
+Next: process a second demo clip (non-KITTI, user-supplied -- a real dashcam/near-miss clip) through `live.py`'s file mode, which already implements exactly the kept feature set (boxes/lead/TTC/band) on any video file, no KITTI-specific code needed. Pending the user providing the `.mp4`.
+
 <!-- Add new dated entries above this line as the project progresses. -->
