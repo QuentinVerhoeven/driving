@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-from lead_ttc import BAND_HALF_WIDTH, Box, LeadSelector, TTCKalman
+from lead_ttc import BAND_HALF_WIDTH, Box, LeadSelector, RapidClosingDetector, TTCKalman, ttc_urgency
 
 # COCO class IDs we care about (same as track.py)
 VEHICLE_CLASSES = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
@@ -143,6 +143,7 @@ class FrameResult:
     lead: object    # the chosen lead Box, or None
     ttc: float      # Kalman TTC in seconds (nan = no meaningful value), or None if there is no lead
     t: float        # timestamp of the frame this was computed from
+    rapid_closing: bool = False   # True if TTC has been sustained below threshold long enough (see RapidClosingDetector)
 
 
 class Pipeline:
@@ -154,6 +155,7 @@ class Pipeline:
         # created ONCE: their memory must survive across frames
         self.selector = LeadSelector(frame_w, frame_h, args.band, args.lane_offset)
         self.kalman = TTCKalman(frame_w)
+        self.rapid_closing = RapidClosingDetector()
         self.n = 0              # frames processed so far
         self.yolo_ms = []       # how long each YOLO call took
         self.lead_counts = {}   # how many frames each track id was the lead
@@ -176,12 +178,16 @@ class Pipeline:
         boxes = to_boxes(r)
         lead = self.selector.update(boxes, t)
         ttc = None
+        rapid_closing = False
         if lead is not None:
             self.lead_counts[lead.track_id] = self.lead_counts.get(lead.track_id, 0) + 1
             _, _, ttc = self.kalman.update(lead.w, t, lead.track_id)
-            self.log_rows.append((frame_id, round(t, 3), lead.track_id, round(lead.w, 1), ttc))
+            rapid_closing = self.rapid_closing.update(ttc, t, lead.track_id)
+            self.log_rows.append((frame_id, round(t, 3), lead.track_id, round(lead.w, 1), ttc, rapid_closing))
+        else:
+            self.rapid_closing.update(None, t, None)   # clears streak state; no lead this frame
         self.n += 1
-        return FrameResult(boxes, lead, ttc, t)
+        return FrameResult(boxes, lead, ttc, t, rapid_closing)
 
 
 class InferenceWorker:
@@ -276,8 +282,13 @@ def draw_banner(img, text):
 
 
 def draw_overlay(img, res, info=None):
-    """Draw a FrameResult onto img (in place): every box + id, the lead in green with a
-    corner TTC readout.
+    """Draw a FrameResult onto img (in place): every box + id, the lead highlighted with a corner
+    TTC readout that grows and changes color as TTC drops (see lead_ttc.ttc_urgency -- green/safe,
+    yellow/caution under RAPID_CLOSING_TTC_S, red/urgent under TTC_URGENT_S), and a red RAPID CLOSING
+    banner across the bottom when the sustained-TTC-drop rule fires (RapidClosingDetector in
+    lead_ttc.py) -- same visual language as kitti_annotate.py's, so both demo videos look consistent.
+    Added 2026-09-30 at the user's request to make the TTC readout more visually prominent; this only
+    changes rendering, not any measurement or threshold logic.
 
     Sizes scale with the frame width so it looks the same at 640 px and at 4K.
 
@@ -306,9 +317,18 @@ def draw_overlay(img, res, info=None):
         cv2.putText(img, f"id {b.track_id}", (int(b.x1), max(int(b.y1) - 5, 15)), FONT, max(0.4, 0.5 * s), (255, 255, 255), thin)
     if res.lead is not None:
         b = res.lead
-        cv2.rectangle(img, (int(b.x1), int(b.y1)), (int(b.x2), int(b.y2)), (0, 255, 0), thick)
+        urgency = ttc_urgency(res.ttc)
+        # (B, G, R): green (safe) -> yellow (caution, < RAPID_CLOSING_TTC_S) -> red (urgent, < TTC_URGENT_S)
+        color = {"safe": (0, 255, 0), "caution": (0, 220, 255), "urgent": (0, 0, 255)}[urgency]
+        box_thick = thick if urgency == "safe" else thick + (1 if urgency == "caution" else 2)
+        text_scale = (1.0 if urgency == "safe" else (1.2 if urgency == "caution" else 1.5)) * hs
+        cv2.rectangle(img, (int(b.x1), int(b.y1)), (int(b.x2), int(b.y2)), color, box_thick)
         # TTC goes in a fixed corner readout too, not just on the box: over a small distant box it was unreadable
-        cv2.putText(img, f"LEAD id {b.track_id}   {ttc_label(res.ttc)}", (int(10 * hs), int(75 * hs)), FONT, 1.0 * hs, (0, 255, 0), hud_thick)
+        cv2.putText(img, f"LEAD id {b.track_id}   {ttc_label(res.ttc)}", (int(10 * hs), int(75 * hs)), FONT, text_scale, color, hud_thick)
+    if res.rapid_closing:
+        banner = "RAPID CLOSING"
+        cv2.rectangle(img, (0, h - int(35 * hs)), (w, h), (0, 0, 255), -1)
+        cv2.putText(img, banner, (int(10 * hs), h - int(10 * hs)), FONT, 0.7 * hs, (255, 255, 255), hud_thick, cv2.LINE_AA)
 
 
 def lane_info(selector):
@@ -534,7 +554,7 @@ def main():
             args.log.parent.mkdir(parents=True, exist_ok=True)
             with open(args.log, "w", newline="") as f:
                 w = csv.writer(f)
-                w.writerow(["frame", "t", "track_id", "width", "ttc"])
+                w.writerow(["frame", "t", "track_id", "width", "ttc", "rapid_closing"])
                 w.writerows(pipeline.log_rows)
             print(f"Saved {args.log}  ({len(pipeline.log_rows)} rows)")
     elapsed = time.time() - start

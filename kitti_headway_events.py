@@ -18,6 +18,9 @@ reasoning as lead_ttc.py's SWITCH_TIME/LOST_TIME): ttc < RAPID_CLOSING_TTC_S
 for >= MIN_EVENT_S. RAPID_CLOSING_TTC_S = 4.0s is a commonly cited
 forward-collision-warning caution threshold, not tuned against labeled
 ground truth -- treat it as a reasonable default, not a validated one.
+The detector itself now lives in lead_ttc.RapidClosingDetector (moved there
+2026-09-30 so live.py's streaming path can share the exact same logic
+instead of a second copy that could drift -- see NOTES.md).
 
 Important honesty note: this uses OUR detector's own lead pick each frame,
 not a verified "this actually is a real lead car" ground truth -- KITTI TTC
@@ -36,20 +39,11 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from kitti_gt_ttc import FRAME_DT_S
-from lead_ttc import Box, LeadSelector, TTCKalman
+from lead_ttc import Box, LeadSelector, TTCKalman, RAPID_CLOSING_TTC_S, MIN_TRUST_AFTER_SWITCH_S
 
-RAPID_CLOSING_TTC_S = 4.0
 MIN_EVENT_S = 0.3   # same value used throughout the project for "sustained", see lead_ttc.py
 EDGE_MARGIN_PX = 2.0
 FPS = 10.0
-
-# Found 2026-09-28 running this on the FULL (not truncated) 0009 sequence: in a busy scene with
-# many simultaneously-visible candidate vehicles, LeadSelector's lead can legitimately switch to a
-# genuinely different real vehicle every few hundred ms, and EVERY such switch resets TTCKalman's
-# state by design (a new track_id might be a different car). For a few frames after any switch, the
-# filter is converging from a cold start on immature width measurements, and can report a spuriously
-# fast-dropping TTC that has nothing to do with real closing behaviour.
-MIN_TRUST_AFTER_SWITCH_S = 1.0
 
 
 def sustained_below(is_below: pd.Series, min_s=MIN_EVENT_S, dt_s=FRAME_DT_S):
