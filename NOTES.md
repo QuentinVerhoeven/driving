@@ -1257,4 +1257,20 @@ Net result: a second, real, honestly-verified demo clip, showing the pipeline wo
 
 Re-rendered both `outputs/kitti_0020_annotated.mp4` and `outputs/autobahn_braking_annotated.mp4`; spot-checked real frames to confirm per-box TTC labels render correctly and no band lines remain.
 
+---
+
+## 2026-09-29 (cont.) — Reverted per-vehicle TTC labels; found and fixed a real Kalman under-reaction
+
+**Reverted the per-box TTC labels** added earlier today: user preferred the plainer look (box + id only for non-lead vehicles, TTC only for the lead). `NearbyVehicleTTC` stays in `lead_ttc.py`, just not wired into `kitti_annotate.py`/`live.py` anymore. Lane-band lines stay removed, per the earlier request.
+
+**Two follow-up questions led to a real finding.** Asked (1) why not derive hard braking from TTC, and (2) why TTC never dropped below ~1s on the autobahn clip when it felt like it should.
+
+1. **Hard braking from TTC: explained, not built.** TTC is a *relative* measurement (closing rate between ego and lead) -- it can't distinguish "ego braked hard" from "the lead accelerated away," since both look identical in the TTC signal (rate suddenly changing). Using it as a hard-braking proxy would misattribute one vehicle's behavior to the other, which is worse than reporting nothing. A real hard-braking signal needs ego's own absolute motion (accelerometer, or OCR-reading the dashcam's burned-in speedometer -- a real, separate feature, not built).
+
+2. **TTC minimum: investigated with real numbers, not assumed.** Computed the RAW (unfiltered) box-width closing rate for the near-miss car directly from re-scanned tracker output -- it genuinely touched 0.72-0.82s several times around frames 477-487. The rendered (Kalman-smoothed) video never went below 1.27s for the same stretch -- the filter was smoothing away a real fast event, not just noise. `TTCKalman`'s own docstring already admitted `q`/`r_meas` were "NOT tuned against ground truth yet" -- this is the first time that gap actually cost real accuracy on a genuine event, not just a theoretical one.
+
+**Retuned q against real ground truth** (`kitti_kalman_tune.py`, new): grid-searched q from 5e-5 (original) to 2e-3 against real 3D-derived ground-truth TTC across every Car track in all 3 KITTI sequences (6300+ frames), scoring BOTH fast-closing accuracy (median error on frames where gt_ttc < 3s) and overall accuracy (all frames), since a more reactive filter isn't free -- it could trade one for the other. It didn't: q=1e-3 improved both simultaneously (fast-closing median error 0.59s -> 0.21s; overall 1.18s -> 0.74s), with error creeping back up again at 2e-3 -- a real, clear optimum, not a guess. `r_meas` left untouched (only q was in question; changing both would muddy which change did what).
+
+**Applied and reverified end to end**: `TTCKalman`'s default q changed 5e-5 -> 1e-3 in `lead_ttc.py`. Re-ran the full pipeline for 0020 and the autobahn clip (`--log` this time, to get the real per-frame values, not just eyeball the video). The autobahn near-miss's filtered TTC minimum went from 1.27s to **0.68s** -- close to the raw signal's true minimum, and a much more honest reflection of how close that moment really was. Re-rendered both demo videos.
+
 <!-- Add new dated entries above this line as the project progresses. -->

@@ -1,8 +1,8 @@
 """
-Annotated-video deliverable: overlay boxes, the selected lead, TTC (for the
-lead AND every other nearby tracked vehicle), and the rapid-closing event
-flag on a real KITTI drive sequence. Combines kitti_track.py's tracked boxes
-with kitti_headway_events.py's per-frame lead/TTC/rapid-closing output.
+Annotated-video deliverable: overlay boxes, the selected lead, TTC, and the
+rapid-closing event flag on a real KITTI drive sequence. Combines
+kitti_track.py's tracked boxes with kitti_headway_events.py's per-frame
+lead/TTC/rapid-closing output.
 
 Trimmed 2026-09-29 (see NOTES.md): this used to also overlay distance,
 headway, ego speed/speed-limit, tailgating, and hard braking -- all of which
@@ -11,10 +11,10 @@ left (boxes, lead, TTC, rapid-closing) is camera-independent, so this same
 script's approach (and live.py's file mode) now works on any video, KITTI
 or not.
 
-Per-vehicle TTC (2026-09-29, cont.): NearbyVehicleTTC (lead_ttc.py) was built
-earlier for exactly this ("situational awareness" -- every visible vehicle's
-box-width TTC, not just the lead) but had never actually been wired into a
-rendered video. Reused here unchanged, not rebuilt.
+A per-vehicle TTC label (NearbyVehicleTTC, lead_ttc.py) was tried on every
+box, not just the lead, then reverted the same day at the user's request
+(preferred the plainer look) -- back to just the lead's TTC. The class
+itself stays in lead_ttc.py, documented, just not wired into this renderer.
 
 Lane-band guide lines removed (2026-09-29, cont.): useful while diagnosing
 the band-width bug, but it's diagnostic clutter for a finished demo, not
@@ -30,19 +30,11 @@ from pathlib import Path
 import cv2
 import pandas as pd
 
-from lead_ttc import Box, NearbyVehicleTTC
-
 FPS = 10.0
 
 LEAD_COLOR = (0, 140, 255)     # orange (BGR) -- the selected lead vehicle
 OTHER_COLOR = (0, 200, 0)      # green -- every other tracked vehicle
 EVENT_COLOR = (0, 0, 255)      # red -- event banner
-
-
-def ttc_label(ttc):
-    if ttc != ttc:   # nan
-        return ""
-    return " >10s" if ttc > 10 else f" {ttc:.1f}s"
 
 # How long to keep showing the last known TTC/event flags through a brief
 # lead-loss gap, purely a rendering choice (see module docstring) -- found
@@ -78,7 +70,6 @@ def main():
     writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), FPS, (w, h))
 
     boxes_by_frame = {frame: g for frame, g in tracks.groupby("frame")}
-    nearby_ttc = NearbyVehicleTTC(w)
 
     last_good_lines, last_good_active, frames_since_good = [], [], GRACE_FRAMES + 1
     last_good_lead_id = None
@@ -97,16 +88,12 @@ def main():
             last_good_lead_id if frames_since_good < GRACE_FRAMES else None)
 
         if frame_idx in boxes_by_frame:
-            frame_boxes = [Box(track_id=int(r.track_id), x1=r.x1, y1=r.y1, x2=r.x2, y2=r.y2)
-                           for r in boxes_by_frame[frame_idx].itertuples()]
-            nearby = nearby_ttc.update(frame_boxes, frame_idx / FPS)   # {track_id: (width, rate, ttc)}
             for r in boxes_by_frame[frame_idx].itertuples():
                 is_lead = display_lead_id is not None and r.track_id == int(display_lead_id)
                 color = LEAD_COLOR if is_lead else OTHER_COLOR
                 thickness = 3 if is_lead else 1
                 cv2.rectangle(img, (int(r.x1), int(r.y1)), (int(r.x2), int(r.y2)), color, thickness)
-                _, _, ttc = nearby.get(r.track_id, (None, None, float("nan")))
-                label = ("LEAD" if is_lead else f"id{r.track_id}") + ttc_label(ttc)
+                label = f"LEAD id{r.track_id}" if is_lead else f"id{r.track_id}"
                 cv2.putText(img, label, (int(r.x1), int(r.y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
         lead_lines = []

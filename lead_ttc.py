@@ -165,11 +165,18 @@ class TTCKalman:
     - Process noise Q is the textbook continuous-white-noise form q * [[dt^3/3, dt^2/2], [dt^2/2, dt]], so the filter
       responds to the same real-time changes whatever the time between measurements (30 fps or ~10 fps).
       (The original diag(q*dt) form was tuned at 30 fps and lost most closing events at ~10 fps.)
-    q and r_meas were tuned so it agrees with the original filter at every frame and stays consistent when only every
-    3rd measurement is used. They are NOT tuned against ground truth yet.
+    q was retuned 2026-09-29 (5e-5 -> 1e-3) against real KITTI ground truth (kitti_kalman_tune.py),
+    after watching a real near-collision on a downloaded dashcam clip never show TTC below 1.27s in
+    the rendered video, despite the raw box-width signal genuinely touching 0.72-0.82s several times
+    in the same stretch -- the old q was smoothing away a real fast event, not just noise. Grid-search
+    across every real Car track in 3 KITTI sequences (6300+ frames) showed this was not a tradeoff:
+    q=1e-3 improved BOTH fast-closing accuracy (median error 0.59s -> 0.21s on frames where ground
+    truth TTC < 3s) AND overall accuracy (1.18s -> 0.74s) versus the original, never-validated value.
+    r_meas was left alone -- only q was in question here, and changing both at once would muddy which
+    change did what. See NOTES.md, 2026-09-29.
     """
 
-    def __init__(self, frame_w, q=5e-5, r_meas=2e-5):
+    def __init__(self, frame_w, q=1e-3, r_meas=2e-5):
         self.frame_w = float(frame_w)
         self.q = q            # how fast the rate may change unexplained (relative-width units)
         self.R = r_meas       # variance of one width measurement (relative-width units): sigma ~ 0.0045 of the frame width
