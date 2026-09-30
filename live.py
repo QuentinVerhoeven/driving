@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-from lead_ttc import Box, LeadSelector, TTCKalman
+from lead_ttc import BAND_HALF_WIDTH, Box, LeadSelector, TTCKalman
 
 # COCO class IDs we care about (same as track.py)
 VEHICLE_CLASSES = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
@@ -460,7 +460,12 @@ def main():
     parser.add_argument("--height", type=int, default=None)
     parser.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270])  # rotate frames if the phone is mounted rotated
     parser.add_argument("--lane-offset", dest="lane_offset", type=float, default=0.0)  # move the lane band left(-)/right(+), fraction of width; also a/d keys
-    parser.add_argument("--band", type=float, default=0.10)  # lane band half-width, fraction of frame width; also w/s keys
+    # lane band half-width, fraction of frame width; also w/s keys. Was hardcoded to 0.10 here,
+    # separately from lead_ttc.BAND_HALF_WIDTH -- found 2026-09-29 while retuning that constant
+    # against ground truth (0.10 -> 0.07, see NOTES.md): this CLI default would have silently kept
+    # using the old, worse value even after the shared constant was fixed. Now reads the same
+    # constant, so a future retune only needs to change one place.
+    parser.add_argument("--band", type=float, default=BAND_HALF_WIDTH)
     parser.add_argument("--save-raw", type=Path, default=None)  # cameras only: save the unannotated feed as NAME.mp4 + NAME_times.csv
     parser.add_argument("--times", type=Path, default=None)     # files only: per-frame capture times saved by --save-raw
     parser.add_argument("--show", action="store_true")  # open a window (needs a display)

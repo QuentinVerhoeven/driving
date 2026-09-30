@@ -1227,4 +1227,20 @@ Applied: `BAND_HALF_WIDTH` in `lead_ttc.py` changed from 0.10 to 0.07 (comment r
 
 Next: process a second demo clip (non-KITTI, user-supplied -- a real dashcam/near-miss clip) through `live.py`'s file mode, which already implements exactly the kept feature set (boxes/lead/TTC/band) on any video file, no KITTI-specific code needed. Pending the user providing the `.mp4`.
 
+---
+
+## 2026-09-29 (cont.) — Second demo clip: real dashcam footage, no KITTI
+
+Under the narrower scope (detection/tracking/lead/TTC/rapid-closing only, camera-independent), a KITTI dependency isn't needed for the demo video at all. User downloaded a real dashcam clip ("Autobahn emergency braking at 200 kmh", 1080p, 551 frames/~18s) and it went into `data/raw/autobahn_braking.mp4`.
+
+**Found and fixed a real inconsistency before running anything**: `live.py --band` had its own hardcoded default (`0.10`), separate from `lead_ttc.BAND_HALF_WIDTH` -- meaning today's retuned value (0.07) would NOT have applied automatically, silently keeping the old, worse band on any future `live.py` run. Fixed: `--band` now defaults to `lead_ttc.BAND_HALF_WIDTH` directly, so a future retune only needs to change one place. Confirmed in the run's own printed summary (`--band 0.07`).
+
+**Ran `live.py`'s file mode** (`uv run python live.py --source data/raw/autobahn_braking.mp4 --out outputs/autobahn_braking_annotated.mp4`) -- no KITTI-specific code involved, confirming the "camera-independent core" framing is real, not aspirational. 551 frames in 144.5s (3.8 fps on CPU, imgsz 1280).
+
+**Verified by watching real frames, not just a clean exit code**: the dramatic moment (ego decelerating from 209 km/h to ~142 km/h, a real Volkswagen Golf directly ahead) is captured well -- `LEAD id160`, **TTC 1.3s** at the closest point, a genuinely compelling near-collision reading.
+
+**A real, honest finding, investigated rather than assumed to be a bug**: right around the closest approach, `id160` stops being labeled lead even though it's still the biggest, closest object in frame. First hypothesis was a camera-mount offset (like the small one found on KITTI's calib). Checked directly instead of guessing: re-ran the tracker on several specific frames and measured the car's box-center trend -- 0.554 -> 0.518 -> 0.437 -> 0.257 -> 0.238 (as a fraction of frame width) over about 2 seconds. That's a **steady, sustained drift**, not a fixed offset -- a real lane change during the emergency maneuver (likely the ego car swerving around the slowing traffic, matching the video's own premise). `LeadSelector` correctly stops calling it "lead" once it's genuinely left the same lane -- this is the declared Scope (steady same-lane following only, not lane-change/cut-out scenarios) working as intended on a real, non-KITTI clip, not a bug to fix.
+
+Net result: a second, real, honestly-verified demo clip, showing the pipeline works on arbitrary downloaded video (not just KITTI), with a genuine dramatic TTC reading and a real example of the Scope boundary being respected rather than silently papered over.
+
 <!-- Add new dated entries above this line as the project progresses. -->

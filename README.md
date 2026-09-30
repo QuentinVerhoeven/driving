@@ -12,7 +12,12 @@ Detection, tracking, lead-vehicle selection, and Kalman-filtered TTC are working
 
 ## Demo
 
-`outputs/kitti_0020_annotated.mp4` — detection, tracking, lead selection, TTC, and the rapid-closing flag overlaid on a real Autobahn traffic sequence, with the lane-band guide lines drawn so a pick is explainable rather than looking arbitrary. Picked after screening all 21 KITTI tracking sequences and visually checking candidates, not just the first one downloaded — see `NOTES.md`, 2026-09-28.
+Two clips, same pipeline, proving it's camera-independent — no KITTI-specific code involved in either:
+
+- `outputs/kitti_0020_annotated.mp4` — a real KITTI Autobahn traffic sequence. Picked after screening all 21 KITTI tracking sequences and visually checking candidates, not just the first one downloaded — see `NOTES.md`, 2026-09-28.
+- `outputs/autobahn_braking_annotated.mp4` — a real downloaded dashcam clip (no KITTI dependency at all), showing a genuine near-collision: TTC drops to **1.3s** at the closest approach. Also shows the system correctly recognizing when a car leaves the same lane (a real lane-change during the clip's emergency maneuver) and stopping the lead label rather than keeping a stale, wrong pick — see `NOTES.md`, 2026-09-29.
+
+Both show boxes, tracking, lane-band guide lines (so a lead pick is explainable, not arbitrary), the lead highlight, TTC, and the rapid-closing flag.
 
 ## A real bug, found and fixed
 
