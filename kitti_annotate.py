@@ -36,16 +36,17 @@ from pathlib import Path
 import cv2
 import pandas as pd
 
-from lead_ttc import ttc_urgency
+from ego_lane import draw_ego_lane, load_egolane
+from lead_ttc import UrgencyHysteresis
+from overlay_style import HUD_EMPHASIS, draw_banner, draw_critical_border, draw_hud
 
 FPS = 10.0
 
 LEAD_COLOR = (0, 140, 255)     # orange (BGR) -- the selected lead vehicle
-OTHER_COLOR = (0, 200, 0)      # green -- every other tracked vehicle
-EVENT_COLOR = (0, 0, 255)      # red -- event banner
+OTHER_COLOR = (230, 230, 230)  # light grey -- every other tracked vehicle (matches live.py, so lead/urgency colors stand out)
 # TTC urgency colors (BGR), keyed by lead_ttc.ttc_urgency()'s tier names -- overrides LEAD_COLOR
 # once a TTC reading exists, so the box/text visibly escalate as TTC drops.
-URGENCY_COLOR = {"safe": (0, 200, 0), "caution": (0, 220, 255), "urgent": (0, 0, 255)}
+URGENCY_COLOR = {"safe": (0, 200, 0), "caution": (0, 220, 255), "urgent": (0, 0, 255), "critical": (0, 0, 255)}
 
 # How long to keep showing the last known TTC/event flags through a brief
 # lead-loss gap, purely a rendering choice (see module docstring) -- found
@@ -56,16 +57,11 @@ URGENCY_COLOR = {"safe": (0, 200, 0), "caution": (0, 220, 255), "urgent": (0, 0,
 GRACE_FRAMES = 5
 
 
-def draw_text_block(frame, lines, x, y, color=(255, 255, 255), scale=0.6):
-    for i, line in enumerate(lines):
-        cv2.putText(frame, line, (x, y + i * 22), cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(frame, line, (x, y + i * 22), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("sequence")
     parser.add_argument("--outdir", type=Path, default=Path("outputs"))
+    parser.add_argument("--egolane", type=Path, default=None)   # outputs/kitti_<seq>_egolane.csv -> draw the lane carpet
     args = parser.parse_args()
     sequence = args.sequence
 
@@ -81,11 +77,13 @@ def main():
     writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), FPS, (w, h))
 
     boxes_by_frame = {frame: g for frame, g in tracks.groupby("frame")}
+    lanes = load_egolane(args.egolane) if args.egolane else {}
+    urgency_tiers = UrgencyHysteresis()   # shared with live.py: no flicker in and out of a tier
 
     last_good_lines, last_good_active, frames_since_good = [], [], GRACE_FRAMES + 1
     last_good_lead_id = None
     last_good_urgency = "safe"
-    last_good_color, last_good_scale = (255, 255, 255), 0.6
+    last_good_color = (255, 255, 255)
 
     for frame_idx, path in enumerate(frames):
         img = cv2.imread(str(path))
@@ -102,26 +100,36 @@ def main():
             last_good_lead_id if frames_since_good < GRACE_FRAMES else None)
         # Urgency for the CURRENT frame's TTC, if any -- used below to decide whether to update the
         # held-over "last good" urgency, and to color the box even before the grace-period text logic runs.
-        current_urgency = ttc_urgency(lead_ttc) if lead_ttc is not None else None
+        current_urgency = urgency_tiers.update(lead_ttc) if lead_ttc is not None else None   # with hysteresis
         display_urgency = current_urgency if current_urgency is not None else (
             last_good_urgency if frames_since_good < GRACE_FRAMES else "safe")
+
+        # ego-lane carpet under the boxes: stops at the lead's bumper, colored by the same urgency tier as the box
+        lead_row = None
+        if display_lead_id is not None and frame_idx in boxes_by_frame:
+            g = boxes_by_frame[frame_idx]
+            match = g[g.track_id == int(display_lead_id)]
+            lead_row = match.iloc[0] if len(match) else None
+        draw_ego_lane(img, lanes.get(frame_idx), display_urgency if lead_row is not None else None,
+                      y_end=lead_row.y2 if lead_row is not None else None)
 
         if frame_idx in boxes_by_frame:
             for r in boxes_by_frame[frame_idx].itertuples():
                 is_lead = display_lead_id is not None and r.track_id == int(display_lead_id)
                 color = URGENCY_COLOR[display_urgency] if is_lead else OTHER_COLOR
-                thickness = (3 if display_urgency == "safe" else (4 if display_urgency == "caution" else 5)) if is_lead else 1
-                cv2.rectangle(img, (int(r.x1), int(r.y1)), (int(r.x2), int(r.y2)), color, thickness)
+                thickness = {"safe": 3, "caution": 4, "urgent": 5, "critical": 6}[display_urgency] if is_lead else 1
+                if is_lead and display_urgency == "critical":   # black outer outline + red frame border
+                    cv2.rectangle(img, (int(r.x1), int(r.y1)), (int(r.x2), int(r.y2)), (0, 0, 0), thickness + 4, cv2.LINE_AA)
+                    draw_critical_border(img)
+                cv2.rectangle(img, (int(r.x1), int(r.y1)), (int(r.x2), int(r.y2)), color, thickness, cv2.LINE_AA)
                 label = f"LEAD id{r.track_id}" if is_lead else f"id{r.track_id}"
                 cv2.putText(img, label, (int(r.x1), int(r.y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
         lead_lines = []
         lead_color = (255, 255, 255)
-        text_scale = 0.6
         if lead_ttc is not None:
-            lead_lines.append(f"TTC: {lead_ttc:.1f} s")
+            lead_lines.append(f"TTC {lead_ttc:.1f} s" if lead_ttc <= 10 else "TTC >10 s")   # same wording as live.py
             lead_color = URGENCY_COLOR[current_urgency]
-            text_scale = {"safe": 0.6, "caution": 0.7, "urgent": 0.85}[current_urgency]
 
         active = []
         if ev is not None and ev.get("rapid_closing"):
@@ -137,19 +145,21 @@ def main():
             last_good_lines, last_good_active, frames_since_good = lead_lines, active, 0
             last_good_lead_id = int(lead_id)
             last_good_urgency = current_urgency
-            last_good_color, last_good_scale = lead_color, text_scale
+            last_good_color = lead_color
         else:
             frames_since_good += 1
             if frames_since_good <= GRACE_FRAMES:
                 lead_lines, active = last_good_lines, last_good_active
-                lead_color, text_scale = last_good_color, last_good_scale
+                lead_color = last_good_color
 
-        draw_text_block(img, lead_lines, 10, 25, color=lead_color, scale=text_scale)
+        # Shared panel style with live.py (overlay_style.py), so both demo videos match
+        if lead_lines:
+            hud_urgency = current_urgency or last_good_urgency
+            draw_hud(img, f"LEAD  id {last_good_lead_id}", lead_lines[0], lead_color, HUD_EMPHASIS[hud_urgency],
+                     critical=hud_urgency == "critical")
 
         if active:
-            banner = " | ".join(active)
-            cv2.rectangle(img, (0, h - 35), (w, h), EVENT_COLOR, -1)
-            cv2.putText(img, banner, (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+            draw_banner(img, " | ".join(active))
 
         writer.write(img)
 

@@ -53,6 +53,13 @@ Usage:
     uv run python kitti_distance.py
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+_ROOT = _Path(__file__).resolve().parent.parent
+for _p in (_ROOT, _ROOT / "scripts", _ROOT / "legacy"):
+    if str(_p) not in _sys.path:
+        _sys.path.insert(0, str(_p))
+
 from pathlib import Path
 
 import matplotlib.pyplot as plt

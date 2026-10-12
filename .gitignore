@@ -6,3 +6,7 @@ cache/
 __pycache__/
 scan_*.jpg
 probe_*.jpg
+NOTES_SUMMARY.md
+RESUME_BULLETS.md
+CLAUDE.md
+NOTES.md

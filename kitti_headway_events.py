@@ -3,7 +3,7 @@ Lead-vehicle TTC + rapid-closing events on a real KITTI sequence run through
 our actual detector+tracker.
 
     lead selection = lead_ttc.LeadSelector
-    TTC             = lead_ttc.TTCKalman
+    TTC             = lead_ttc.TTCKalmanCA (constant-acceleration; was TTCKalman until 2026-10-01)
 
 Trimmed 2026-09-29 (see NOTES.md): this used to also compute distance,
 headway, tailgating, and hard braking, all of which needed KITTI's
@@ -39,7 +39,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from kitti_gt_ttc import FRAME_DT_S
-from lead_ttc import Box, LeadSelector, TTCKalman, RAPID_CLOSING_TTC_S, MIN_TRUST_AFTER_SWITCH_S
+from ego_lane import load_egolane
+from lead_ttc import Box, LeadSelector, TTCKalmanCA, RAPID_CLOSING_TTC_S, MIN_TRUST_AFTER_SWITCH_S
 
 MIN_EVENT_S = 0.3   # same value used throughout the project for "sustained", see lead_ttc.py
 EDGE_MARGIN_PX = 2.0
@@ -74,6 +75,7 @@ def event_spans(flag: pd.Series, time_s: pd.Series):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("sequence")
+    parser.add_argument("--egolane", type=Path, default=None)   # outputs/kitti_<seq>_egolane.csv -> lane-gated lead pick (see NOTES.md, 2026-10-01)
     args = parser.parse_args()
     sequence = args.sequence
 
@@ -85,14 +87,15 @@ def main():
     frame_h, frame_w = sample_img.shape[:2]
 
     selector = LeadSelector(frame_w, frame_h)
-    kalman = TTCKalman(frame_w)
+    lanes = load_egolane(args.egolane) if args.egolane else {}
+    kalman = TTCKalmanCA(frame_w)
 
     rows = []
     last_lead_id, lead_switch_time = None, None
     for frame, g in tracks.groupby("frame"):
         t = frame / FPS
         boxes = [Box(track_id=int(r.track_id), x1=r.x1, y1=r.y1, x2=r.x2, y2=r.y2) for r in g.itertuples()]
-        lead = selector.update(boxes, t)
+        lead = selector.update(boxes, t, lanes.get(frame))
 
         lead_track_id, ttc_s = None, float("nan")
         if lead is not None:

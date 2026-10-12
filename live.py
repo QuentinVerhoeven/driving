@@ -34,7 +34,10 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-from lead_ttc import BAND_HALF_WIDTH, Box, LeadSelector, RapidClosingDetector, TTCKalman, ttc_urgency
+from ego_lane import draw_ego_lane, load_egolane
+from overlay_style import HUD_EMPHASIS, draw_critical_border, draw_hud
+from overlay_style import draw_banner as draw_hud_banner
+from lead_ttc import BAND_HALF_WIDTH, Box, LeadSelector, RapidClosingDetector, TTCKalmanCA, UrgencyHysteresis
 
 # COCO class IDs we care about (same as track.py)
 VEHICLE_CLASSES = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
@@ -144,6 +147,8 @@ class FrameResult:
     ttc: float      # Kalman TTC in seconds (nan = no meaningful value), or None if there is no lead
     t: float        # timestamp of the frame this was computed from
     rapid_closing: bool = False   # True if TTC has been sustained below threshold long enough (see RapidClosingDetector)
+    lane: object = None           # EgoLaneBounds used for this frame's lead pick, or None (band fallback)
+    urgency: str = "safe"         # display tier for the lead's TTC, with hysteresis (lead_ttc.UrgencyHysteresis)
 
 
 class Pipeline:
@@ -154,8 +159,11 @@ class Pipeline:
         self.args = args
         # created ONCE: their memory must survive across frames
         self.selector = LeadSelector(frame_w, frame_h, args.band, args.lane_offset)
-        self.kalman = TTCKalman(frame_w)
+        self.kalman = TTCKalmanCA(frame_w)   # constant-acceleration model, see lead_ttc.TTCKalmanCA
         self.rapid_closing = RapidClosingDetector()
+        self.urgency = UrgencyHysteresis()
+        # files only: precomputed ego lane per frame index (ego_lane.py); None = use the fixed lane band
+        self.lanes = load_egolane(args.egolane) if getattr(args, "egolane", None) else None
         self.n = 0              # frames processed so far
         self.yolo_ms = []       # how long each YOLO call took
         self.lead_counts = {}   # how many frames each track id was the lead
@@ -176,7 +184,8 @@ class Pipeline:
         self.yolo_ms.append((time.time() - t0) * 1000)
 
         boxes = to_boxes(r)
-        lead = self.selector.update(boxes, t)
+        lane = self.lanes.get(frame_id) if self.lanes is not None else None
+        lead = self.selector.update(boxes, t, lane)
         ttc = None
         rapid_closing = False
         if lead is not None:
@@ -187,7 +196,12 @@ class Pipeline:
         else:
             self.rapid_closing.update(None, t, None)   # clears streak state; no lead this frame
         self.n += 1
-        return FrameResult(boxes, lead, ttc, t, rapid_closing)
+        if lead is not None:
+            urgency = self.urgency.update(ttc)
+        else:
+            self.urgency.reset()
+            urgency = "safe"
+        return FrameResult(boxes, lead, ttc, t, rapid_closing, lane, urgency)
 
 
 class InferenceWorker:
@@ -281,7 +295,7 @@ def draw_banner(img, text):
     cv2.putText(img, text, (x, y), FONT, 1.4 * s, (0, 0, 255), thick)
 
 
-def draw_overlay(img, res, info=None):
+def draw_overlay(img, res, info=None, inset=None):
     """Draw a FrameResult onto img (in place): every box + id, the lead highlighted with a corner
     TTC readout that grows and changes color as TTC drops (see lead_ttc.ttc_urgency -- green/safe,
     yellow/caution under RAPID_CLOSING_TTC_S, red/urgent under TTC_URGENT_S), and a red RAPID CLOSING
@@ -312,23 +326,30 @@ def draw_overlay(img, res, info=None):
     if res is None:
         return
 
+    # ego-lane carpet first, so boxes draw on top of it; stops at the lead's bumper, colored by urgency
+    if res.lane is not None:
+        draw_ego_lane(img, res.lane, res.urgency if res.lead is not None else None,
+                      y_end=res.lead.y2 if res.lead is not None else None, inset=inset)
+
     for b in res.boxes:
         cv2.rectangle(img, (int(b.x1), int(b.y1)), (int(b.x2), int(b.y2)), (255, 255, 255), thin)
         cv2.putText(img, f"id {b.track_id}", (int(b.x1), max(int(b.y1) - 5, 15)), FONT, max(0.4, 0.5 * s), (255, 255, 255), thin)
     if res.lead is not None:
         b = res.lead
-        urgency = ttc_urgency(res.ttc)
+        urgency = res.urgency
         # (B, G, R): green (safe) -> yellow (caution, < RAPID_CLOSING_TTC_S) -> red (urgent, < TTC_URGENT_S)
-        color = {"safe": (0, 255, 0), "caution": (0, 220, 255), "urgent": (0, 0, 255)}[urgency]
-        box_thick = thick if urgency == "safe" else thick + (1 if urgency == "caution" else 2)
-        text_scale = (1.0 if urgency == "safe" else (1.2 if urgency == "caution" else 1.5)) * hs
-        cv2.rectangle(img, (int(b.x1), int(b.y1)), (int(b.x2), int(b.y2)), color, box_thick)
-        # TTC goes in a fixed corner readout too, not just on the box: over a small distant box it was unreadable
-        cv2.putText(img, f"LEAD id {b.track_id}   {ttc_label(res.ttc)}", (int(10 * hs), int(75 * hs)), FONT, text_scale, color, hud_thick)
+        color = {"safe": (0, 255, 0), "caution": (0, 220, 255), "urgent": (0, 0, 255), "critical": (0, 0, 255)}[urgency]
+        box_thick = thick + {"safe": 0, "caution": 1, "urgent": 2, "critical": 3}[urgency]
+        if urgency == "critical":   # black outer outline so the red box pops even over the red/black carpet
+            cv2.rectangle(img, (int(b.x1), int(b.y1)), (int(b.x2), int(b.y2)), (0, 0, 0), box_thick + 2 * thick, cv2.LINE_AA)
+            draw_critical_border(img)
+        cv2.rectangle(img, (int(b.x1), int(b.y1)), (int(b.x2), int(b.y2)), color, box_thick, cv2.LINE_AA)
+        # TTC goes in a fixed corner readout too, not just on the box: over a small distant box it was unreadable.
+        # Shared panel style with kitti_annotate.py (overlay_style.py), so both demo videos match.
+        draw_hud(img, f"LEAD  id {b.track_id}", ttc_label(res.ttc), color, HUD_EMPHASIS[urgency],
+                 critical=urgency == "critical")
     if res.rapid_closing:
-        banner = "RAPID CLOSING"
-        cv2.rectangle(img, (0, h - int(35 * hs)), (w, h), (0, 0, 255), -1)
-        cv2.putText(img, banner, (int(10 * hs), h - int(10 * hs)), FONT, 0.7 * hs, (255, 255, 255), hud_thick, cv2.LINE_AA)
+        draw_hud_banner(img, "RAPID CLOSING")
 
 
 def lane_info(selector):
@@ -386,7 +407,8 @@ def run_file(cap, pipeline, writer, args, src_fps, rotate_code):
                 fps = (len(loop_times) - 1) / (loop_times[-1] - loop_times[0])
             if pipeline.n % 20 == 0:
                 print(f"  processed {pipeline.n} (frame {frame_idx}): {fps:.1f} fps, YOLO {statistics.median(pipeline.yolo_ms[-20:]):.0f} ms/frame")
-        draw_overlay(frame, res, f"model {fps:.1f} fps (stride {args.stride}) | {lane_info(pipeline.selector)}")
+        # no debug HUD line on file renders (fps is printed to the console above): these are the demo videos
+        draw_overlay(frame, res, inset=args.inset)
 
         if writer:
             writer.write(frame)
@@ -491,6 +513,8 @@ def main():
     # using the old, worse value even after the shared constant was fixed. Now reads the same
     # constant, so a future retune only needs to change one place.
     parser.add_argument("--band", type=float, default=BAND_HALF_WIDTH)
+    parser.add_argument("--egolane", type=Path, default=None)  # files only: <name>_egolane.csv from ego_lane.py -> lane-gated lead pick + lane carpet
+    parser.add_argument("--inset", default=None)  # x1,y1,x2,y2 fractions of a burned-in overlay (e.g. a speedometer) to keep the lane carpet off
     parser.add_argument("--save-raw", type=Path, default=None)  # cameras only: save the unannotated feed as NAME.mp4 + NAME_times.csv
     parser.add_argument("--times", type=Path, default=None)     # files only: per-frame capture times saved by --save-raw
     parser.add_argument("--show", action="store_true")  # open a window (needs a display)
@@ -500,6 +524,7 @@ def main():
     args = parser.parse_args()
 
     is_camera = args.source.isdigit()
+    args.inset = [float(v) for v in args.inset.split(",")] if args.inset else None
     if args.imgsz is None:
         args.imgsz = 640 if is_camera else 1280
     if args.save_raw and not args.log:

@@ -1,11 +1,12 @@
 [project]
 name = "driving"
 version = "0.1.0"
-description = "Add your description here"
+description = "Dashcam CV pipeline: vehicle detection/tracking, lead-vehicle selection, and time-to-collision estimation with a rapid-closing event detector"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "matplotlib>=3.11.1",
+    "onnxruntime>=1.30.0",
     "opencv-python>=5.0.0.93",
     "osmnx>=2.1.1",
     "pandas>=3.0.5",
